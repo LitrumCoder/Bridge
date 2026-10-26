@@ -199,6 +199,22 @@ pub fn control_message() -> impl Strategy<Value = ControlMessage> {
         }
         .into()),
         Just(Unpaired.into()),
+        (
+            any::<bool>(),
+            proptest::collection::vec(any::<u8>(), 0..=64)
+        )
+            .prop_map(|(qr, v)| {
+                PairStart {
+                    method: if qr {
+                        PairMethod::QrSecret
+                    } else {
+                        PairMethod::Code
+                    },
+                    spake: BoundedVec::try_from_vec(v).unwrap_or_default(),
+                }
+                .into()
+            }),
+        any::<[u8; 32]>().prop_map(|mac| PairConfirm { mac }.into()),
     ]
 }
 

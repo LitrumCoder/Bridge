@@ -149,6 +149,29 @@ pub struct ClockPong {
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct Unpaired;
 
+/// Which secret the initiator typed or scanned.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum PairMethod {
+    /// The 6-digit code shown on the responder.
+    Code,
+    /// The 128-bit secret from the responder's QR code.
+    QrSecret,
+}
+
+/// SPAKE2 message (ADR-0004). The initiator sends it right after `ClientHello` with
+/// `Intent::Pair`, the responder answers with its own.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PairStart {
+    pub method: PairMethod,
+    pub spake: BoundedVec<u8, 64>,
+}
+
+/// Key confirmation: HMAC over both certificate fingerprints, keyed from the PAKE.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct PairConfirm {
+    pub mac: [u8; 32],
+}
+
 define_messages! {
     pub enum ControlMessage for FeatureId::CORE {
         1 => ClientHello,
@@ -162,6 +185,8 @@ define_messages! {
         9 => ClockPing,
         10 => ClockPong,
         11 => Unpaired,
+        12 => PairStart,
+        13 => PairConfirm,
     }
 }
 
@@ -202,6 +227,8 @@ impl Validate for LayoutDigest {}
 impl Validate for LayoutRequest {}
 impl Validate for ClockPing {}
 impl Validate for Unpaired {}
+impl Validate for PairStart {}
+impl Validate for PairConfirm {}
 
 impl Validate for Permissions {
     fn validate(&self) -> Result<(), DecodeError> {

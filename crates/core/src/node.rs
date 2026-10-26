@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use bridge_protocol::control::{
     ClientHello, ClockPing, ClockPong, ControlMessage, DeviceState, DeviceStatus, Intent,
-    Permissions, Reject, ServerHello, StateReason, Unpaired,
+    PairConfirm, PairStart, Permissions, Reject, ServerHello, StateReason, Unpaired,
 };
 use bridge_protocol::{
     BoundedString, BoundedVec, ChannelClass, CloseCode, DeviceId, Envelope, FeatureId,
@@ -17,9 +17,14 @@ use bridge_protocol::{
 
 use crate::clock::{ClockEstimate, ClockSample, ClockSync};
 use crate::feature::{FeatureCx, FeatureRegistry, Outgoing, PeerDownReason, PeerId, PeerView};
+use crate::pairing::{
+    self, Entropy, PairingError, PairingKey, PairingSecret, PairingWindow, Pake, Side,
+};
 use crate::{ChannelScheduler, Micros};
 
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Pairing adds two round trips and runs while a person waits.
+pub const PAIRING_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const CLOCK_FAST_INTERVAL: Duration = Duration::from_millis(200);
 const CLOCK_FAST_PINGS: u32 = 25;
 const CLOCK_INTERVAL: Duration = Duration::from_secs(1);
@@ -31,6 +36,8 @@ pub struct CoreConfig {
     pub platform: Platform,
     pub app_version: String,
     pub protocol: ProtocolVersion,
+    /// Permissions a freshly paired device gets (own devices: everything).
+    pub default_grants: Vec<PermissionId>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -53,8 +60,8 @@ pub struct ConnectInfo {
     pub trusted: bool,
     /// What we allow this peer to do to us.
     pub granted: Vec<PermissionId>,
-    /// Only meaningful for `Role::Initiator`.
-    pub intent: Intent,
+    /// Initiator only: pair with this secret instead of a normal hello.
+    pub pair: Option<PairingSecret>,
     /// Opaque session id chosen by the driver for `ServerHello`.
     pub session: SessionToken,
 }
@@ -100,6 +107,17 @@ pub enum CoreEvent {
     Unpaired {
         peer: PeerId,
     },
+    /// Pairing succeeded; the driver persists the peer in its trust store.
+    Paired {
+        conn: ConnId,
+        peer: PeerId,
+        role: Role,
+    },
+    PairingFailed {
+        conn: ConnId,
+        peer: PeerId,
+        reason: String,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -135,6 +153,12 @@ pub struct CoreStats {
 enum Phase {
     AwaitServerHello,
     AwaitClientHello,
+    /// Responder: got `ClientHello` with `Intent::Pair`, waits for the SPAKE2 message.
+    AwaitPairStart,
+    /// Initiator: sent its SPAKE2 message, waits for the responder's.
+    AwaitPairReply,
+    /// Both: keys derived, waiting for the other side's confirmation.
+    AwaitPairConfirm,
     Active,
     Closing,
 }
@@ -151,6 +175,10 @@ struct Session {
     /// Feature traffic that overtook `ServerHello` on other streams (initiator only).
     early: Vec<Early>,
     early_bytes: usize,
+    pake: Option<Pake>,
+    pair_key: Option<PairingKey>,
+    /// Responder: the hello to continue with once pairing succeeds.
+    pending_hello: Option<ClientHello>,
 }
 
 enum Early {
@@ -203,10 +231,12 @@ pub struct Core {
     actions: VecDeque<Action>,
     outgoing: Vec<Outgoing>,
     stats: CoreStats,
+    pairing: PairingWindow,
+    entropy: Box<dyn Entropy>,
 }
 
 impl Core {
-    pub fn new(config: CoreConfig, registry: FeatureRegistry) -> Self {
+    pub fn new(config: CoreConfig, registry: FeatureRegistry, entropy: Box<dyn Entropy>) -> Self {
         Self {
             config,
             registry,
@@ -217,7 +247,37 @@ impl Core {
             actions: VecDeque::new(),
             outgoing: Vec::new(),
             stats: CoreStats::default(),
+            pairing: PairingWindow::default(),
+            entropy,
         }
+    }
+
+    /// Opens the pairing window and returns the fresh code and QR secret to show.
+    pub fn open_pairing(
+        &mut self,
+        now: Micros,
+        duration: Duration,
+    ) -> Result<(PairingSecret, PairingSecret), PairingError> {
+        let code = PairingSecret::generate_code(self.entropy.as_mut());
+        let qr = PairingSecret::generate_qr(self.entropy.as_mut());
+        self.pairing.open(now, code.clone(), qr.clone(), duration)?;
+        Ok((code, qr))
+    }
+
+    pub fn close_pairing(&mut self) {
+        self.pairing.close();
+    }
+
+    pub fn pairing_open(&self, now: Micros) -> bool {
+        self.pairing.is_open(now)
+    }
+
+    pub fn pairing_expires(&self) -> Option<Micros> {
+        self.pairing.expires()
+    }
+
+    pub fn pairing_locked_until(&self, now: Micros) -> Option<Micros> {
+        self.pairing.locked_until(now)
     }
 
     pub fn config(&self) -> &CoreConfig {
@@ -291,22 +351,46 @@ impl Core {
             pings_sent: 0,
             early: Vec::new(),
             early_bytes: 0,
+            pake: None,
+            pair_key: None,
+            pending_hello: None,
             info,
         };
-        let intent = session.info.intent;
+        let pair = session.info.pair.clone();
+        let peer = session.info.peer;
         self.sessions.insert(conn, session);
-        if role == Role::Initiator {
-            let hello = ClientHello {
-                protocol: self.config.protocol,
-                app_version: BoundedString::truncating(&self.config.app_version),
-                device_id: self.config.device_id,
-                name: BoundedString::truncating(&self.config.name),
-                platform: self.config.platform,
-                features: BoundedVec::try_from_vec(self.registry.descriptors()).unwrap_or_default(),
-                intent,
-                resume: None,
+        if role != Role::Initiator {
+            return;
+        }
+        let hello = ClientHello {
+            protocol: self.config.protocol,
+            app_version: BoundedString::truncating(&self.config.app_version),
+            device_id: self.config.device_id,
+            name: BoundedString::truncating(&self.config.name),
+            platform: self.config.platform,
+            features: BoundedVec::try_from_vec(self.registry.descriptors()).unwrap_or_default(),
+            intent: if pair.is_some() {
+                Intent::Pair
+            } else {
+                Intent::Normal
+            },
+            resume: None,
+        };
+        self.send_control(conn, hello.into());
+        if let Some(secret) = pair {
+            let us = self.config.device_id;
+            let (pake, msg) =
+                pairing::start(Side::Initiator, &secret, us, peer, self.entropy.as_mut());
+            if let Some(s) = self.sessions.get_mut(&conn) {
+                s.pake = Some(pake);
+                s.phase = Phase::AwaitPairReply;
+                s.deadline = Some(now + PAIRING_HANDSHAKE_TIMEOUT);
+            }
+            let start = PairStart {
+                method: secret.method(),
+                spake: BoundedVec::try_from_vec(msg).unwrap_or_default(),
             };
-            self.send_control(conn, hello.into());
+            self.send_control(conn, start.into());
         }
     }
 
@@ -331,7 +415,12 @@ impl Core {
             }
             return;
         }
-        if phase == Phase::AwaitServerHello {
+        let initiator_waiting = phase != Phase::Active
+            && self
+                .sessions
+                .get(&conn)
+                .is_some_and(|s| s.info.role == Role::Initiator);
+        if initiator_waiting {
             let buffered = self
                 .sessions
                 .get_mut(&conn)
@@ -357,7 +446,7 @@ impl Core {
     pub fn handle_datagram(&mut self, now: Micros, conn: ConnId, bytes: &[u8]) {
         match self.sessions.get_mut(&conn) {
             Some(s) if s.phase == Phase::Active => {}
-            Some(s) if s.phase == Phase::AwaitServerHello => {
+            Some(s) if s.info.role == Role::Initiator && s.phase != Phase::Closing => {
                 // Datagrams are unreliable anyway: past the limit they are just dropped.
                 s.buffer_early(Early::Datagram(bytes.to_vec()));
                 return;
@@ -399,7 +488,11 @@ impl Core {
                 continue;
             };
             match s.phase {
-                Phase::AwaitClientHello | Phase::AwaitServerHello => {
+                Phase::AwaitClientHello
+                | Phase::AwaitServerHello
+                | Phase::AwaitPairStart
+                | Phase::AwaitPairReply
+                | Phase::AwaitPairConfirm => {
                     if s.deadline.is_some_and(|d| now >= d) {
                         self.close(conn, CloseCode::PROTOCOL_VIOLATION, "handshake timeout");
                     }
@@ -430,6 +523,31 @@ impl Core {
         }
         for id in self.registry.ids() {
             self.dispatch_simple(now, id, |f, cx| f.on_device_state(cx, state));
+        }
+    }
+
+    /// Changes what `peer` may do to us; applies to live connections immediately.
+    pub fn set_grants(&mut self, peer: &PeerId, granted: Vec<PermissionId>) {
+        let conns: Vec<ConnId> = self
+            .sessions
+            .iter_mut()
+            .filter(|(_, s)| s.info.peer == *peer)
+            .map(|(c, s)| {
+                s.info.granted = granted.clone();
+                *c
+            })
+            .collect();
+        for conn in conns {
+            if self
+                .sessions
+                .get(&conn)
+                .is_some_and(|s| s.phase == Phase::Active)
+            {
+                let msg = Permissions {
+                    granted: BoundedVec::try_from_vec(granted.clone()).unwrap_or_default(),
+                };
+                self.send_control(conn, msg.into());
+            }
         }
     }
 
@@ -473,7 +591,22 @@ impl Core {
             (Phase::AwaitServerHello, ControlMessage::ServerHello(h)) => {
                 self.on_server_hello(now, conn, h)
             }
-            (Phase::AwaitServerHello | Phase::Active, ControlMessage::Reject(r)) => {
+            (Phase::AwaitPairStart, ControlMessage::PairStart(p)) => {
+                self.on_pair_start_responder(now, conn, p)
+            }
+            (Phase::AwaitPairReply, ControlMessage::PairStart(p)) => {
+                self.on_pair_start_initiator(conn, p)
+            }
+            (Phase::AwaitPairConfirm, ControlMessage::PairConfirm(c)) => {
+                self.on_pair_confirm(now, conn, c)
+            }
+            (
+                Phase::AwaitServerHello
+                | Phase::AwaitPairReply
+                | Phase::AwaitPairConfirm
+                | Phase::Active,
+                ControlMessage::Reject(r),
+            ) => {
                 if let Some(s) = self.sessions.get(&conn) {
                     self.actions.push_back(Action::Event(CoreEvent::Rejected {
                         conn,
@@ -563,16 +696,131 @@ impl Core {
             return self.reject(conn, CloseCode::INCOMPATIBLE_VERSION, &msg);
         }
         if h.intent == Intent::Pair {
-            // TODO(M3): run the SPAKE2 pairing exchange.
-            return self.reject(
-                conn,
-                CloseCode::PAIRING_FAILED,
-                "pairing is not available yet",
-            );
+            if let Some(until) = self.pairing.locked_until(now) {
+                let secs = until.saturating_sub(now).as_secs();
+                let msg = format!("pairing is locked for {secs} s after repeated failures");
+                return self.reject(conn, CloseCode::PAIRING_FAILED, &msg);
+            }
+            if !self.pairing.is_open(now) {
+                return self.reject(
+                    conn,
+                    CloseCode::PAIRING_FAILED,
+                    "pairing is not open on this device",
+                );
+            }
+            if let Some(s) = self.sessions.get_mut(&conn) {
+                s.pending_hello = Some(h);
+                s.phase = Phase::AwaitPairStart;
+                s.deadline = Some(now + PAIRING_HANDSHAKE_TIMEOUT);
+            }
+            return;
         }
         if !s.info.trusted {
             return self.reject(conn, CloseCode::NOT_PAIRED, "this device is not paired");
         }
+        self.accept_hello(now, conn, h);
+    }
+
+    fn on_pair_start_responder(&mut self, now: Micros, conn: ConnId, p: PairStart) {
+        let Some(secret) = self.pairing.secret(now, p.method) else {
+            return self.reject(
+                conn,
+                CloseCode::PAIRING_FAILED,
+                "pairing is not open on this device",
+            );
+        };
+        let Some(peer) = self.sessions.get(&conn).map(|s| s.info.peer) else {
+            return;
+        };
+        let us = self.config.device_id;
+        let (pake, msg) = pairing::start(Side::Responder, &secret, peer, us, self.entropy.as_mut());
+        let Some(key) = pake.finish(&p.spake) else {
+            self.pairing.record_failure(now);
+            return self.pairing_failed(conn, peer, "malformed pairing message");
+        };
+        if let Some(s) = self.sessions.get_mut(&conn) {
+            s.pair_key = Some(key);
+            s.phase = Phase::AwaitPairConfirm;
+        }
+        let reply = PairStart {
+            method: p.method,
+            spake: BoundedVec::try_from_vec(msg).unwrap_or_default(),
+        };
+        self.send_control(conn, reply.into());
+    }
+
+    fn on_pair_start_initiator(&mut self, conn: ConnId, p: PairStart) {
+        let Some(s) = self.sessions.get_mut(&conn) else {
+            return;
+        };
+        let peer = s.info.peer;
+        let Some(key) = s.pake.take().and_then(|pake| pake.finish(&p.spake)) else {
+            return self.pairing_failed(conn, peer, "malformed pairing message");
+        };
+        let mac = key.confirmation(Side::Initiator);
+        s.pair_key = Some(key);
+        s.phase = Phase::AwaitPairConfirm;
+        self.send_control(conn, PairConfirm { mac }.into());
+    }
+
+    fn on_pair_confirm(&mut self, now: Micros, conn: ConnId, c: PairConfirm) {
+        let Some(s) = self.sessions.get_mut(&conn) else {
+            return;
+        };
+        let peer = s.info.peer;
+        let role = s.info.role;
+        let Some(key) = s.pair_key.take() else { return };
+        match role {
+            Role::Responder => {
+                if !key.verify(Side::Initiator, &c.mac) {
+                    self.pairing.record_failure(now);
+                    return self.pairing_failed(conn, peer, "the code does not match");
+                }
+                self.pairing.record_success();
+                let mac = key.confirmation(Side::Responder);
+                self.send_control(conn, PairConfirm { mac }.into());
+                let hello = self.sessions.get_mut(&conn).and_then(|s| {
+                    s.info.trusted = true;
+                    s.info.granted = self.config.default_grants.clone();
+                    s.pending_hello.take()
+                });
+                self.actions
+                    .push_back(Action::Event(CoreEvent::Paired { conn, peer, role }));
+                if let Some(h) = hello {
+                    self.accept_hello(now, conn, h);
+                }
+            }
+            Role::Initiator => {
+                if !key.verify(Side::Responder, &c.mac) {
+                    return self.pairing_failed(
+                        conn,
+                        peer,
+                        "the other device could not prove the code",
+                    );
+                }
+                s.info.trusted = true;
+                s.phase = Phase::AwaitServerHello;
+                self.actions
+                    .push_back(Action::Event(CoreEvent::Paired { conn, peer, role }));
+            }
+        }
+    }
+
+    fn pairing_failed(&mut self, conn: ConnId, peer: PeerId, reason: &str) {
+        self.actions
+            .push_back(Action::Event(CoreEvent::PairingFailed {
+                conn,
+                peer,
+                reason: reason.to_owned(),
+            }));
+        self.reject(conn, CloseCode::PAIRING_FAILED, reason);
+    }
+
+    /// Answers a hello from a trusted device and activates the session.
+    fn accept_hello(&mut self, now: Micros, conn: ConnId, h: ClientHello) {
+        let Some(s) = self.sessions.get(&conn) else {
+            return;
+        };
         let negotiated = negotiate_features(&self.registry.descriptors(), &h.features);
         let reply = ServerHello {
             protocol: self.config.protocol,

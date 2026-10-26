@@ -1,8 +1,12 @@
 //! QUIC implementation of [`Transport`] on quinn + rustls (ring), ADR-0002.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+
+use tokio::sync::mpsc;
+use tracing::debug;
 
 use bridge_core::ConnectionKind;
 use bridge_protocol::{CloseCode, DeviceId};
@@ -50,9 +54,109 @@ pub struct QuicTransport {
     identity: DeviceIdentity,
     provider: Arc<CryptoProvider>,
     options: QuicOptions,
+    accepted: tokio::sync::Mutex<mpsc::Receiver<Result<QuicConnection, TransportError>>>,
+}
+
+/// A host may run at most this many handshakes with us at once (threat model §10.3).
+const MAX_HANDSHAKES_PER_IP: usize = 4;
+const MAX_HANDSHAKES: usize = 64;
+const HANDSHAKE_LIMIT: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct Inflight {
+    per_ip: HashMap<IpAddr, usize>,
+    total: usize,
+}
+
+struct Slot {
+    inflight: Arc<Mutex<Inflight>>,
+    ip: IpAddr,
+}
+
+impl Slot {
+    fn take(inflight: &Arc<Mutex<Inflight>>, ip: IpAddr) -> Option<Self> {
+        let mut f = inflight.lock().unwrap_or_else(|p| p.into_inner());
+        let n = f.per_ip.get(&ip).copied().unwrap_or(0);
+        if n >= MAX_HANDSHAKES_PER_IP || f.total >= MAX_HANDSHAKES {
+            return None;
+        }
+        f.per_ip.insert(ip, n + 1);
+        f.total += 1;
+        Some(Self {
+            inflight: inflight.clone(),
+            ip,
+        })
+    }
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut f = self.inflight.lock().unwrap_or_else(|p| p.into_inner());
+        f.total = f.total.saturating_sub(1);
+        if let Some(n) = f.per_ip.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                f.per_ip.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// Accepts incoming connections and runs their handshakes in parallel, so one slow or
+/// malicious client cannot stall the others.
+async fn acceptor(endpoint: Endpoint, tx: mpsc::Sender<Result<QuicConnection, TransportError>>) {
+    let inflight = Arc::new(Mutex::new(Inflight::default()));
+    while let Some(incoming) = endpoint.accept().await {
+        if !incoming.remote_address_validated() {
+            // Address validation before any expensive work (no amplification).
+            let _ = incoming.retry();
+            continue;
+        }
+        let Some(slot) = Slot::take(&inflight, incoming.remote_address().ip()) else {
+            debug!(addr = %incoming.remote_address(), "too many handshakes, refusing");
+            incoming.refuse();
+            continue;
+        };
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let result = match tokio::time::timeout(HANDSHAKE_LIMIT, incoming).await {
+                Err(_) => Err(TransportError::TimedOut),
+                Ok(Err(e)) => Err(map_connect_error(e)),
+                Ok(Ok(conn)) => match (peer_id(&conn), alpn_kind(&conn)) {
+                    (Some(peer), Some(kind)) => Ok(QuicConnection::new(conn, peer, kind)),
+                    _ => {
+                        conn.close(
+                            VarInt::from_u32(CloseCode::PROTOCOL_VIOLATION.0),
+                            b"bad handshake",
+                        );
+                        Err(TransportError::BadIdentity("peer certificate or alpn"))
+                    }
+                },
+            };
+            drop(slot);
+            let _ = tx.send(result).await;
+        });
+    }
 }
 
 impl QuicTransport {
+    fn from_endpoint(
+        endpoint: Endpoint,
+        identity: DeviceIdentity,
+        provider: Arc<CryptoProvider>,
+        options: QuicOptions,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(16);
+        tokio::spawn(acceptor(endpoint.clone(), tx));
+        Self {
+            endpoint,
+            identity,
+            provider,
+            options,
+            accepted: tokio::sync::Mutex::new(rx),
+        }
+    }
+
     /// Binds a UDP socket on `addr` (port 0 picks a free port).
     pub fn bind(
         addr: SocketAddr,
@@ -69,12 +173,7 @@ impl QuicTransport {
             socket,
             Arc::new(TokioRuntime),
         )?;
-        Ok(Self {
-            endpoint,
-            identity,
-            provider,
-            options,
-        })
+        Ok(Self::from_endpoint(endpoint, identity, provider, options))
     }
 
     /// Uses a custom socket, e.g. the in-memory network simulator of the testkit.
@@ -92,12 +191,7 @@ impl QuicTransport {
             socket,
             Arc::new(TokioRuntime),
         )?;
-        Ok(Self {
-            endpoint,
-            identity,
-            provider,
-            options,
-        })
+        Ok(Self::from_endpoint(endpoint, identity, provider, options))
     }
 
     pub fn identity(&self) -> &DeviceIdentity {
@@ -130,27 +224,7 @@ impl QuicTransport {
     }
 
     pub async fn accept_quic(&self) -> Option<Result<QuicConnection, TransportError>> {
-        loop {
-            let incoming = self.endpoint.accept().await?;
-            if !incoming.remote_address_validated() {
-                // Address validation before any expensive work (no amplification).
-                let _ = incoming.retry();
-                continue;
-            }
-            return Some(match incoming.await {
-                Ok(conn) => match (peer_id(&conn), alpn_kind(&conn)) {
-                    (Some(peer), Some(kind)) => Ok(QuicConnection::new(conn, peer, kind)),
-                    _ => {
-                        conn.close(
-                            VarInt::from_u32(CloseCode::PROTOCOL_VIOLATION.0),
-                            b"bad handshake",
-                        );
-                        Err(TransportError::BadIdentity("peer certificate or alpn"))
-                    }
-                },
-                Err(e) => Err(map_connect_error(e)),
-            });
-        }
+        self.accepted.lock().await.recv().await
     }
 }
 
@@ -457,5 +531,33 @@ impl RecvStream for QuicRecv {
 
     fn stop(&mut self, code: u32) {
         let _ = self.0.stop(VarInt::from_u32(code));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_slots_are_limited_per_host_and_released() {
+        let inflight = Arc::new(Mutex::new(Inflight::default()));
+        let a: IpAddr = "10.0.0.1".parse().expect("ip");
+        let b: IpAddr = "10.0.0.2".parse().expect("ip");
+        let held: Vec<Slot> = (0..MAX_HANDSHAKES_PER_IP)
+            .map(|_| Slot::take(&inflight, a).expect("slot"))
+            .collect();
+        assert!(
+            Slot::take(&inflight, a).is_none(),
+            "fifth handshake from one host is refused"
+        );
+        assert!(
+            Slot::take(&inflight, b).is_some(),
+            "other hosts are not affected"
+        );
+        drop(held);
+        assert!(Slot::take(&inflight, a).is_some(), "slots are released");
+        let f = inflight.lock().expect("lock");
+        assert_eq!(f.total, 0);
+        assert!(f.per_ip.is_empty());
     }
 }

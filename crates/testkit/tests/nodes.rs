@@ -285,7 +285,7 @@ async fn revocation_closes_and_stops_redialling() {
     let mut events = a.handle.subscribe();
     a.handle.dial(b.addr, b.id);
     assert!(a.handle.wait_connected(b.id, true, WAIT).await);
-    b.handle.revoke(a.id);
+    b.handle.unpair(a.id);
     let reason = tokio::time::timeout(WAIT, async {
         loop {
             if let Ok(NodeEvent::DialStopped { reason, .. }) = events.recv().await {

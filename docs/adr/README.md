@@ -8,7 +8,7 @@
 | [0001](0001-sans-io-core-and-workspace.md) | Sans-IO ядро и структура workspace | Предложено |
 | [0002](0002-transport-quic.md) | QUIC (quinn) + rustls/ring, два соединения на пару, datagrams для мыши | Предложено |
 | [0003](0003-wire-format-and-versioning.md) | postcard, конверт с FeatureId, правила версионирования | Предложено |
-| [0004](0004-identity-and-pairing.md) | Самоподписанные сертификаты, закрепление SPKI, SPAKE2 по коду / QR | Предложено |
+| [0004](0004-identity-and-pairing.md) | Самоподписанные сертификаты, закрепление SPKI, SPAKE2 по коду / QR | Принято, реализовано |
 | [0005](0005-input-capture-and-injection.md) | Захват/инъекция по ОС, коды USB HID, инвариант отпускания | Предложено |
 | [0006](0006-screen-geometry.md) | Раскладка экранов в физических миллиметрах | Предложено |
 | [0007](0007-clipboard-native.md) | Нативные реализации буфера с отложенной выдачей | Предложено |

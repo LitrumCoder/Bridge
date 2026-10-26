@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bridge_core::*;
-use bridge_protocol::control::{DeviceState, Intent, StateReason};
+use bridge_protocol::control::{DeviceState, StateReason};
 use bridge_protocol::{
     ChannelClass, CloseCode, DeviceId, FeatureId, PROTOCOL_VERSION, PermissionId, Platform,
     ProtocolVersion, SessionToken,
@@ -117,11 +117,31 @@ fn node(byte: u8, protocol: ProtocolVersion, permission: Option<PermissionId>) -
         platform: Platform::LINUX,
         app_version: "0.1.0".into(),
         protocol,
+        default_grants: vec![PermissionId::CLIPBOARD],
     };
     Node {
-        core: Core::new(config, registry),
+        core: Core::new(
+            config,
+            registry,
+            Box::new(TestEntropy(u64::from(byte) * 7919)),
+        ),
         log,
         id,
+    }
+}
+
+/// Deterministic randomness for tests (never use outside tests).
+struct TestEntropy(u64);
+
+impl Entropy for TestEntropy {
+    fn fill(&mut self, buf: &mut [u8]) {
+        for b in buf {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            *b = (self.0 >> 56) as u8;
+        }
     }
 }
 
@@ -208,7 +228,7 @@ fn info(
         peer,
         trusted,
         granted: granted.to_vec(),
-        intent: Intent::Normal,
+        pair: None,
         session: SessionToken([conn as u8; 16]),
     }
 }
@@ -355,24 +375,178 @@ fn untrusted_device_is_refused() {
     assert!(b.core.peers().is_empty());
 }
 
+/// A dials B with a pairing secret; B is untrusted-by-default for A.
+fn pair_attempt(
+    a: &mut Node,
+    b: &mut Node,
+    conn: u64,
+    secret: PairingSecret,
+    now: Micros,
+) -> Outcome {
+    let link = Link {
+        ca: ConnId(conn),
+        cb: ConnId(conn + 1000),
+    };
+    let mut ia = info(conn, Role::Initiator, b.id, false, &[]);
+    ia.pair = Some(secret);
+    a.core.handle_connected(now, ia);
+    b.core
+        .handle_connected(now, info(conn + 1000, Role::Responder, a.id, false, &[]));
+    pump(a, b, &link, now)
+}
+
+fn rejected_with(events: &[CoreEvent], code: CloseCode) -> Option<String> {
+    events.iter().find_map(|e| match e {
+        CoreEvent::Rejected {
+            code: c, message, ..
+        } if *c == code => Some(message.clone()),
+        _ => None,
+    })
+}
+
 #[test]
-fn pairing_intent_is_refused_until_pairing_exists() {
+fn pairing_is_refused_while_the_window_is_closed() {
     let mut a = node(1, PROTOCOL_VERSION, None);
     let mut b = node(2, PROTOCOL_VERSION, None);
-    let link = Link {
-        ca: ConnId(1),
-        cb: ConnId(1001),
-    };
-    let mut ia = info(1, Role::Initiator, b.id, true, &[]);
-    ia.intent = Intent::Pair;
+    let out = pair_attempt(
+        &mut a,
+        &mut b,
+        1,
+        PairingSecret::from_code("123456").unwrap(),
+        Micros(1),
+    );
+    let msg = rejected_with(&out.events_a, CloseCode::PAIRING_FAILED).expect("refused");
+    assert!(msg.contains("not open"), "{msg}");
+}
+
+#[test]
+fn pairing_with_the_right_code_pairs_and_activates() {
+    let mut a = node(1, PROTOCOL_VERSION, Some(PermissionId::CLIPBOARD));
+    let mut b = node(2, PROTOCOL_VERSION, Some(PermissionId::CLIPBOARD));
+    let (code, _qr) = b.core.open_pairing(Micros(1), PAIRING_WINDOW).unwrap();
+    assert!(b.core.pairing_open(Micros(1)));
+    let out = pair_attempt(
+        &mut a,
+        &mut b,
+        1,
+        PairingSecret::from_code(code.code().unwrap()).unwrap(),
+        Micros(2),
+    );
+    assert!(out.events_a.iter().any(|e| matches!(
+        e,
+        CoreEvent::Paired {
+            role: Role::Initiator,
+            ..
+        }
+    )));
+    assert!(out.events_b.iter().any(|e| matches!(
+        e,
+        CoreEvent::Paired {
+            role: Role::Responder,
+            ..
+        }
+    )));
+    assert!(has_peer_up(&out.events_a, b.id) && has_peer_up(&out.events_b, a.id));
+    assert!(!b.core.pairing_open(Micros(3)), "one pairing per window");
+    // The responder granted the default permissions to the new device.
+    assert!(out.events_a.iter().any(|e| matches!(
+        e,
+        CoreEvent::PeerPermissions { granted, .. } if granted == &vec![PermissionId::CLIPBOARD]
+    )));
+}
+
+#[test]
+fn pairing_with_the_qr_secret_works() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (_code, qr) = b.core.open_pairing(Micros(1), PAIRING_WINDOW).unwrap();
+    let out = pair_attempt(&mut a, &mut b, 1, qr, Micros(2));
+    assert!(has_peer_up(&out.events_a, b.id));
+}
+
+#[test]
+fn wrong_code_fails_closes_the_window_and_locks_after_three() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    for attempt in 0..3u64 {
+        let now = Micros(1_000_000 + attempt * 1_000_000);
+        let (code, _) = b.core.open_pairing(now, PAIRING_WINDOW).unwrap();
+        let wrong = if code.code() == Some("000000") {
+            "000001"
+        } else {
+            "000000"
+        };
+        let out = pair_attempt(
+            &mut a,
+            &mut b,
+            10 + attempt,
+            PairingSecret::from_code(wrong).unwrap(),
+            now,
+        );
+        assert!(rejected_with(&out.events_a, CloseCode::PAIRING_FAILED).is_some());
+        assert!(
+            out.events_b
+                .iter()
+                .any(|e| matches!(e, CoreEvent::PairingFailed { .. }))
+        );
+        assert!(!b.core.pairing_open(now), "a failed attempt burns the code");
+        assert!(a.core.peers().is_empty());
+    }
+    let later = Micros(10_000_000);
+    assert!(matches!(
+        b.core.open_pairing(later, PAIRING_WINDOW),
+        Err(PairingError::Locked { .. })
+    ));
+    let out = pair_attempt(
+        &mut a,
+        &mut b,
+        50,
+        PairingSecret::from_code("111111").unwrap(),
+        later,
+    );
+    assert!(
+        rejected_with(&out.events_a, CloseCode::PAIRING_FAILED)
+            .unwrap()
+            .contains("locked")
+    );
+}
+
+#[test]
+fn feature_traffic_during_pairing_from_the_initiator_is_a_violation_on_the_responder() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    b.core.open_pairing(Micros(1), PAIRING_WINDOW).unwrap();
+    let mut ia = info(1, Role::Initiator, b.id, false, &[]);
+    ia.pair = Some(PairingSecret::from_code("123456").unwrap());
     a.core.handle_connected(Micros(1), ia);
     b.core
         .handle_connected(Micros(1), info(1001, Role::Responder, a.id, false, &[]));
-    let out = pump(&mut a, &mut b, &link, Micros(1));
-    assert!(out.events_a.iter().any(|e| matches!(
-        e,
-        CoreEvent::Rejected {
-            code: CloseCode::PAIRING_FAILED,
+    let hello: Vec<Action> = std::iter::from_fn(|| a.core.poll_action()).collect();
+    for act in hello {
+        if let Action::Send {
+            channel, envelope, ..
+        } = act
+        {
+            b.core
+                .handle_frame(Micros(1), ConnId(1001), channel, &envelope);
+        }
+    }
+    let env = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 1,
+        payload: vec![0],
+    };
+    b.core.handle_frame(
+        Micros(1),
+        ConnId(1001),
+        ChannelClass::Clipboard,
+        &env.to_bytes(),
+    );
+    let acts: Vec<Action> = std::iter::from_fn(|| b.core.poll_action()).collect();
+    assert!(acts.iter().any(|x| matches!(
+        x,
+        Action::Close {
+            code: CloseCode::PROTOCOL_VIOLATION,
             ..
         }
     )));

@@ -46,6 +46,19 @@ pub fn mutually_trusting(net: &Network, n: usize) -> Result<Vec<NodeSpec>, Trans
         .collect())
 }
 
+/// Prepares `n` nodes that trust nobody (pairing tests).
+pub fn strangers(net: &Network, n: usize) -> Result<Vec<NodeSpec>, TransportError> {
+    (0..n)
+        .map(|_| {
+            Ok(NodeSpec {
+                identity: DeviceIdentity::generate()?,
+                trust: TrustStore::new([]),
+                socket: net.socket(),
+            })
+        })
+        .collect()
+}
+
 /// Fast failure detection so tests about loss and partitions stay short.
 pub fn test_options() -> QuicOptions {
     QuicOptions {

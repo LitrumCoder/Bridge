@@ -6,8 +6,11 @@
 pub mod clock;
 mod feature;
 mod node;
+pub mod pairing;
 mod scheduler;
 mod time;
+
+pub use pairing::{Entropy, PAIRING_WINDOW, PairingError, PairingSecret};
 
 pub use feature::{
     Feature, FeatureCx, FeatureError, FeatureInfo, FeatureRegistry, PeerDownReason, PeerId,
@@ -15,7 +18,7 @@ pub use feature::{
 };
 pub use node::{
     Action, ConnId, ConnectInfo, Core, CoreConfig, CoreEvent, CoreStats, HANDSHAKE_TIMEOUT,
-    PeerInfo, Role,
+    PAIRING_HANDSHAKE_TIMEOUT, PeerInfo, Role,
 };
 pub use scheduler::{ChannelPlan, ChannelScheduler, ConnectionKind};
 pub use time::Micros;

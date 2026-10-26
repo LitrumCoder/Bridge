@@ -7,91 +7,32 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bridge_core::{
-    Action, ConnId, ConnectInfo, Core, CoreConfig, CoreEvent, Feature, FeatureRegistry, Micros,
-    PeerInfo, RegistryError, Role,
+    Action, ConnId, ConnectInfo, Core, CoreConfig, CoreEvent, Entropy, Feature, FeatureRegistry,
+    Micros, PairingSecret, PeerInfo, RegistryError, Role,
 };
-use bridge_protocol::control::{DeviceState, Intent};
+use bridge_discovery::{AdState, Advertisement, Discovered, Discovery, DiscoveryEvent};
+use bridge_ipc::{NodeStatus, PeerStatus};
+use bridge_protocol::control::DeviceState;
 use bridge_protocol::{
     ChannelClass, CloseCode, DeviceId, FrameDecoder, PROTOCOL_VERSION, PermissionId, Platform,
-    SessionToken, encode_frame,
+    ProtocolVersion, SessionToken, encode_frame,
 };
 use bridge_transport::{
     CloseInfo, ClosedBy, Connection, ExpectedPeer, PeerAddr, QuicOptions, QuicTransport,
-    RecvStream, SendStream, Transport, TransportError, TrustPolicy,
+    RecvStream, SendStream, Transport, TransportError,
 };
 use bytes::Bytes;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
-use bridge_ipc::{NodeStatus, PeerStatus};
+use crate::pairing_uri::PairingInvite;
+use crate::trust::{ALL_PERMISSIONS, TrustStore, TrustedPeer};
 
 const MAX_BACKOFF: Duration = Duration::from_secs(5);
 const STABLE_CONNECTION: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Debug)]
-pub struct TrustedPeer {
-    pub id: DeviceId,
-    /// What we allow this peer to do to us.
-    pub granted: Vec<PermissionId>,
-}
-
-impl TrustedPeer {
-    /// Own devices get everything by default (ARCHITECTURE §9).
-    pub fn own_device(id: DeviceId) -> Self {
-        Self {
-            id,
-            granted: vec![
-                PermissionId::INPUT,
-                PermissionId::FILES,
-                PermissionId::CLIPBOARD,
-                PermissionId::MIDI,
-            ],
-        }
-    }
-}
-
-/// In-memory trust store; persisted by the caller. TODO(M3): pairing and persistence.
-#[derive(Default)]
-pub struct TrustStore {
-    peers: Mutex<HashMap<DeviceId, TrustedPeer>>,
-}
-
-impl TrustStore {
-    pub fn new(peers: impl IntoIterator<Item = TrustedPeer>) -> Arc<Self> {
-        Arc::new(Self {
-            peers: Mutex::new(peers.into_iter().map(|p| (p.id, p)).collect()),
-        })
-    }
-
-    pub fn get(&self, id: &DeviceId) -> Option<TrustedPeer> {
-        self.lock().get(id).cloned()
-    }
-
-    pub fn insert(&self, peer: TrustedPeer) {
-        self.lock().insert(peer.id, peer);
-    }
-
-    pub fn remove(&self, id: &DeviceId) -> bool {
-        self.lock().remove(id).is_some()
-    }
-
-    pub fn all(&self) -> Vec<TrustedPeer> {
-        let mut v: Vec<TrustedPeer> = self.lock().values().cloned().collect();
-        v.sort_by_key(|p| p.id);
-        v
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<DeviceId, TrustedPeer>> {
-        self.peers.lock().unwrap_or_else(|p| p.into_inner())
-    }
-}
-
-impl TrustPolicy for TrustStore {
-    fn is_trusted(&self, id: &DeviceId) -> bool {
-        self.lock().contains_key(id)
-    }
-}
+const PAIR_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug)]
 pub enum NodeEvent {
@@ -102,6 +43,7 @@ pub enum NodeEvent {
         peer: DeviceId,
         reason: String,
     },
+    Nearby(DiscoveryEvent),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,13 +54,28 @@ pub enum NodeError {
     Registry(#[from] RegistryError),
     #[error("the node has stopped")]
     Stopped,
+    #[error("{0}")]
+    Pairing(String),
+}
+
+/// OS randomness for the core (pairing codes, SPAKE2 scalars).
+struct OsEntropy(ring::rand::SystemRandom);
+
+impl Entropy for OsEntropy {
+    fn fill(&mut self, buf: &mut [u8]) {
+        ring::rand::SecureRandom::fill(&self.0, buf)
+            .expect("the OS random number generator failed");
+    }
 }
 
 pub struct NodeBuilder {
     name: String,
     registry: FeatureRegistry,
     trust: Arc<TrustStore>,
-    protocol: bridge_protocol::ProtocolVersion,
+    protocol: ProtocolVersion,
+    discovery: Option<Arc<dyn Discovery>>,
+    hide_name: bool,
+    entropy: Option<Box<dyn Entropy>>,
 }
 
 impl NodeBuilder {
@@ -128,13 +85,10 @@ impl NodeBuilder {
             registry: FeatureRegistry::new(),
             trust,
             protocol: PROTOCOL_VERSION,
+            discovery: None,
+            hide_name: false,
+            entropy: None,
         }
-    }
-
-    /// Overrides the advertised protocol version (compatibility tests only).
-    pub fn protocol_version(mut self, version: bridge_protocol::ProtocolVersion) -> Self {
-        self.protocol = version;
-        self
     }
 
     pub fn feature(mut self, feature: impl Feature) -> Result<Self, RegistryError> {
@@ -142,10 +96,36 @@ impl NodeBuilder {
         Ok(self)
     }
 
+    pub fn discovery(mut self, discovery: Arc<dyn Discovery>) -> Self {
+        self.discovery = Some(discovery);
+        self
+    }
+
+    /// Announce only the fingerprint, not the device name (privacy setting).
+    pub fn hide_name(mut self, hide: bool) -> Self {
+        self.hide_name = hide;
+        self
+    }
+
+    /// Overrides the advertised protocol version (compatibility tests only).
+    pub fn protocol_version(mut self, version: ProtocolVersion) -> Self {
+        self.protocol = version;
+        self
+    }
+
+    /// Replaces OS randomness (deterministic tests only).
+    pub fn entropy(mut self, entropy: Box<dyn Entropy>) -> Self {
+        self.entropy = Some(entropy);
+        self
+    }
+
     /// Starts the node on an already bound transport. Must run inside a tokio runtime.
     pub fn start(self, transport: QuicTransport) -> Result<NodeHandle, NodeError> {
         let device_id = transport.identity().id();
         let PeerAddr::Ip(listen) = transport.local_addr()?;
+        let entropy = self
+            .entropy
+            .unwrap_or_else(|| Box::new(OsEntropy(ring::rand::SystemRandom::new())));
         let core = Core::new(
             CoreConfig {
                 device_id,
@@ -153,8 +133,10 @@ impl NodeBuilder {
                 platform: Platform::current(),
                 app_version: env!("CARGO_PKG_VERSION").to_owned(),
                 protocol: self.protocol,
+                default_grants: ALL_PERMISSIONS.to_vec(),
             },
             self.registry,
+            entropy,
         );
         let transport = Arc::new(transport);
         let (input_tx, input_rx) = mpsc::unbounded_channel();
@@ -162,7 +144,7 @@ impl NodeBuilder {
         let (connected_tx, connected_rx) = watch::channel(HashSet::new());
         let status = Arc::new(Mutex::new(NodeStatus {
             device_id,
-            name: self.name,
+            name: self.name.clone(),
             listen,
             state: DeviceState::Connected,
             peers: Vec::new(),
@@ -176,6 +158,10 @@ impl NodeBuilder {
                 transport: transport.clone(),
                 trust: self.trust.clone(),
                 next_conn: Mutex::new(0),
+                dials: Mutex::new(HashMap::new()),
+                nearby: Mutex::new(HashMap::new()),
+                discovery: self.discovery.clone(),
+                listen,
             }),
         };
         let driver = Driver {
@@ -186,10 +172,28 @@ impl NodeBuilder {
             events,
             connected: connected_tx,
             status,
-            trust: self.trust,
+            trust: self.trust.clone(),
         };
         tokio::spawn(driver.run(input_rx));
         tokio::spawn(accept_loop(handle.clone()));
+
+        if let Some(d) = &self.discovery {
+            let ad = Advertisement {
+                id: device_id,
+                name: (!self.hide_name).then(|| self.name.clone()),
+                port: listen.port(),
+                state: AdState::Connected,
+            };
+            if let Err(e) = d.advertise(&ad) {
+                warn!("cannot announce this device: {e}");
+            }
+            tokio::spawn(discovery_loop(handle.clone(), d.subscribe()));
+        }
+        for peer in self.trust.all() {
+            if let Some(addr) = peer.addrs.first() {
+                handle.dial(*addr, peer.id);
+            }
+        }
         Ok(handle)
     }
 }
@@ -202,6 +206,10 @@ struct Inner {
     transport: Arc<QuicTransport>,
     trust: Arc<TrustStore>,
     next_conn: Mutex<u64>,
+    dials: Mutex<HashMap<DeviceId, (SocketAddr, JoinHandle<()>)>>,
+    nearby: Mutex<HashMap<DeviceId, Discovered>>,
+    discovery: Option<Arc<dyn Discovery>>,
+    listen: SocketAddr,
 }
 
 /// Cheap, cloneable handle to a running node.
@@ -213,6 +221,10 @@ pub struct NodeHandle {
 impl NodeHandle {
     pub fn device_id(&self) -> DeviceId {
         self.inner.transport.identity().id()
+    }
+
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.inner.listen
     }
 
     pub fn status(&self) -> NodeStatus {
@@ -235,6 +247,20 @@ impl NodeHandle {
         self.inner.connected.borrow().contains(peer)
     }
 
+    /// Devices currently announced on the local network (paired or not).
+    pub fn nearby(&self) -> Vec<Discovered> {
+        let mut v: Vec<Discovered> = self
+            .inner
+            .nearby
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .cloned()
+            .collect();
+        v.sort_by_key(|d| d.id);
+        v
+    }
+
     /// Waits until `peer` is (or is not) connected, up to `timeout`.
     pub async fn wait_connected(&self, peer: DeviceId, connected: bool, timeout: Duration) -> bool {
         let mut rx = self.inner.connected.clone();
@@ -244,16 +270,150 @@ impl NodeHandle {
     }
 
     /// Keeps a connection to `peer` at `addr`, redialling with backoff while it is lost.
+    /// A second call for the same peer replaces the address.
     pub fn dial(&self, addr: SocketAddr, peer: DeviceId) {
-        tokio::spawn(dial_loop(self.clone(), addr, peer));
+        let mut dials = self.inner.dials.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((old, task)) = dials.get(&peer) {
+            if *old == addr && !task.is_finished() {
+                return;
+            }
+            task.abort();
+        }
+        let task = tokio::spawn(dial_loop(self.clone(), addr, peer));
+        dials.insert(peer, (addr, task));
     }
 
-    pub fn revoke(&self, peer: DeviceId) {
-        self.inner.trust.remove(&peer);
+    fn stop_dial(&self, peer: &DeviceId) {
+        if let Some((_, task)) = self
+            .inner
+            .dials
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(peer)
+        {
+            task.abort();
+        }
+    }
+
+    /// Forgets `peer`: removes it from the trust store, tells it, closes connections.
+    pub fn unpair(&self, peer: DeviceId) -> bool {
+        self.stop_dial(&peer);
+        let known = self.inner.trust.remove(&peer);
         let _ = self.inner.input.send(Input::Revoke(peer));
+        known
+    }
+
+    pub fn set_permissions(&self, peer: DeviceId, granted: Vec<PermissionId>) -> bool {
+        let g = granted.clone();
+        let known = self.inner.trust.update(&peer, |p| p.granted = g);
+        if known {
+            let _ = self.inner.input.send(Input::SetGrants(peer, granted));
+        }
+        known
+    }
+
+    /// Opens the pairing window and returns what to show: the code and the QR URI.
+    pub async fn open_pairing(&self) -> Result<PairingInvite, NodeError> {
+        let (tx, rx) = oneshot::channel();
+        self.inner
+            .input
+            .send(Input::OpenPairing(tx))
+            .map_err(|_| NodeError::Stopped)?;
+        let (code, qr, expires_in) = rx
+            .await
+            .map_err(|_| NodeError::Stopped)?
+            .map_err(NodeError::Pairing)?;
+        Ok(PairingInvite::new(
+            self.device_id(),
+            self.advertised_addr(),
+            &code,
+            &qr,
+            expires_in,
+        ))
+    }
+
+    pub fn close_pairing(&self) {
+        let _ = self.inner.input.send(Input::ClosePairing);
+    }
+
+    /// The address peers should dial: a LAN address of this machine with our port.
+    fn advertised_addr(&self) -> SocketAddr {
+        let listen = self.inner.listen;
+        if !listen.ip().is_unspecified() {
+            return listen;
+        }
+        // Routing lookup only; nothing is sent.
+        std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|s| s.connect("192.0.2.1:9").and_then(|_| s.local_addr()))
+            .map(|a| SocketAddr::new(a.ip(), listen.port()))
+            .unwrap_or(listen)
+    }
+
+    /// Pairs with the device at `addr` using a code or QR secret; on success the device
+    /// is trusted and kept connected. Returns its id.
+    pub async fn pair(
+        &self,
+        addr: SocketAddr,
+        expect: ExpectedPeer,
+        secret: PairingSecret,
+    ) -> Result<DeviceId, NodeError> {
+        let mut events = self.subscribe();
+        let conn = self
+            .inner
+            .transport
+            .connect(
+                PeerAddr::Ip(addr),
+                expect,
+                bridge_core::ConnectionKind::Interactive,
+            )
+            .await?;
+        let peer = conn.peer();
+        let (conn_id, mut closed) = self.attach(conn, Role::Initiator, Some(secret)).await?;
+        let outcome = tokio::time::timeout(PAIR_TIMEOUT, async {
+            loop {
+                let ev = tokio::select! {
+                    ev = events.recv() => ev,
+                    info = &mut closed => {
+                        let why = info.map(|i| i.reason).unwrap_or_default();
+                        return Err(if why.is_empty() { "the connection closed".to_owned() } else { why });
+                    }
+                };
+                match ev {
+                    Ok(NodeEvent::Core(CoreEvent::Paired { conn, peer, .. })) if conn == conn_id => {
+                        return Ok(peer);
+                    }
+                    Ok(NodeEvent::Core(CoreEvent::PairingFailed { conn, reason, .. })) if conn == conn_id => {
+                        return Err(reason);
+                    }
+                    Ok(NodeEvent::Core(CoreEvent::Rejected { conn, message, .. })) if conn == conn_id => {
+                        return Err(message);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return Err("the node stopped".to_owned()),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .map_err(|_| NodeError::Pairing("pairing timed out".into()))?;
+        let paired = outcome.map_err(NodeError::Pairing)?;
+        debug_assert_eq!(paired, peer);
+        self.dial(addr, paired);
+        Ok(paired)
     }
 
     pub async fn shutdown(&self) {
+        if let Some(d) = &self.inner.discovery {
+            d.withdraw();
+        }
+        for (_, (_, task)) in self
+            .inner
+            .dials
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain()
+        {
+            task.abort();
+        }
         let (tx, rx) = oneshot::channel();
         if self.inner.input.send(Input::Shutdown(tx)).is_ok() {
             let _ = rx.await;
@@ -276,6 +436,7 @@ impl NodeHandle {
         &self,
         conn: Arc<dyn Connection>,
         role: Role,
+        pair: Option<PairingSecret>,
     ) -> Result<(ConnId, oneshot::Receiver<CloseInfo>), TransportError> {
         let priority = 100;
         let (mut send, mut recv) = match role {
@@ -301,7 +462,7 @@ impl NodeHandle {
         let id = self.next_conn();
         let (closed_tx, closed_rx) = oneshot::channel();
         let input = self.inner.input.clone();
-        let (writer, writer_rx) = mpsc::unbounded_channel();
+        let (writer, writer_rx) = mpsc::unbounded_channel::<WriterMsg>();
         tokio::spawn(async move { write_frames(&mut *send, writer_rx).await });
         let input2 = input.clone();
         tokio::spawn(
@@ -314,6 +475,7 @@ impl NodeHandle {
                 role,
                 control: writer,
                 closed: closed_tx,
+                pair,
             })
             .map_err(|_| TransportError::Other("node stopped".into()))?;
         Ok((id, closed_rx))
@@ -327,7 +489,7 @@ async fn accept_loop(node: NodeHandle) {
                 let node = node.clone();
                 tokio::spawn(async move {
                     let peer = conn.peer();
-                    if let Err(e) = node.attach(conn, Role::Responder).await {
+                    if let Err(e) = node.attach(conn, Role::Responder, None).await {
                         debug!(%peer, "incoming connection failed: {e}");
                     }
                 });
@@ -335,6 +497,46 @@ async fn accept_loop(node: NodeHandle) {
             Err(e) => debug!("incoming handshake failed: {e}"),
         }
     }
+}
+
+async fn discovery_loop(node: NodeHandle, mut events: mpsc::UnboundedReceiver<DiscoveryEvent>) {
+    while let Some(ev) = events.recv().await {
+        match &ev {
+            DiscoveryEvent::Found(d) => {
+                node.inner
+                    .nearby
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(d.id, d.clone());
+                let trusted = node.inner.trust.get(&d.id).is_some();
+                if trusted
+                    && d.state != AdState::Left
+                    && !node.is_connected(&d.id)
+                    && let Some(addr) = preferred_addr(&d.addrs)
+                {
+                    node.dial(addr, d.id);
+                }
+            }
+            DiscoveryEvent::Lost(id) => {
+                node.inner
+                    .nearby
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(id);
+            }
+        }
+        let _ = node.inner.events.send(NodeEvent::Nearby(ev));
+    }
+}
+
+/// IPv4 LAN addresses first: link-local IPv6 needs a scope id that is easy to get wrong.
+fn preferred_addr(addrs: &[SocketAddr]) -> Option<SocketAddr> {
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4() && !a.ip().is_loopback())
+        .or_else(|| addrs.iter().find(|a| !a.ip().is_loopback()))
+        .or_else(|| addrs.first())
+        .copied()
 }
 
 async fn dial_loop(node: NodeHandle, addr: SocketAddr, peer: DeviceId) {
@@ -363,7 +565,7 @@ async fn dial_loop(node: NodeHandle, addr: SocketAddr, peer: DeviceId) {
             )
             .await;
         let stop = match result {
-            Ok(conn) => match node.attach(conn, Role::Initiator).await {
+            Ok(conn) => match node.attach(conn, Role::Initiator, None).await {
                 Ok((_, closed)) => match closed.await {
                     Ok(info) => permanent(&info),
                     Err(_) => return,
@@ -422,10 +624,38 @@ async fn read_exact(r: &mut Box<dyn RecvStream>, buf: &mut [u8]) -> Result<(), T
     Ok(())
 }
 
-async fn write_frames(send: &mut dyn SendStream, mut rx: mpsc::UnboundedReceiver<Vec<u8>>) {
-    while let Some(frame) = rx.recv().await {
-        if send.write_all(&frame).await.is_err() {
-            return;
+enum WriterMsg {
+    Frame(Vec<u8>),
+    /// Close the connection after everything queued before it has been written:
+    /// closing a QUIC connection discards unsent stream data, and a `Reject` or
+    /// `Unpaired` right before the close must reach the peer.
+    CloseAfter {
+        conn: Arc<dyn Connection>,
+        code: CloseCode,
+        reason: String,
+    },
+}
+
+const CLOSE_FLUSH_LIMIT: Duration = Duration::from_millis(500);
+
+async fn write_frames(send: &mut dyn SendStream, mut rx: mpsc::UnboundedReceiver<WriterMsg>) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            WriterMsg::Frame(frame) => {
+                if send.write_all(&frame).await.is_err() {
+                    return;
+                }
+            }
+            WriterMsg::CloseAfter { conn, code, reason } => {
+                let _ = send.finish();
+                // Give the peer a moment to acknowledge the last frames.
+                let _ = tokio::time::timeout(CLOSE_FLUSH_LIMIT, async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                })
+                .await;
+                conn.close(code, &reason);
+                return;
+            }
         }
     }
     let _ = send.finish();
@@ -521,13 +751,16 @@ async fn read_datagrams(
     }
 }
 
+type PairingReply = Result<(PairingSecret, PairingSecret, Duration), String>;
+
 enum Input {
     Connected {
         id: ConnId,
         conn: Arc<dyn Connection>,
         role: Role,
-        control: mpsc::UnboundedSender<Vec<u8>>,
+        control: mpsc::UnboundedSender<WriterMsg>,
         closed: oneshot::Sender<CloseInfo>,
+        pair: Option<PairingSecret>,
     },
     Frame {
         conn: ConnId,
@@ -547,12 +780,15 @@ enum Input {
         info: CloseInfo,
     },
     Revoke(DeviceId),
+    SetGrants(DeviceId, Vec<PermissionId>),
+    OpenPairing(oneshot::Sender<PairingReply>),
+    ClosePairing,
     Shutdown(oneshot::Sender<()>),
 }
 
 struct ConnEntry {
     conn: Arc<dyn Connection>,
-    writers: HashMap<ChannelClass, mpsc::UnboundedSender<Vec<u8>>>,
+    writers: HashMap<ChannelClass, mpsc::UnboundedSender<WriterMsg>>,
     closed: Option<oneshot::Sender<CloseInfo>>,
 }
 
@@ -595,6 +831,7 @@ impl Driver {
                 }
             }
             self.execute();
+            self.sync_pairing_window();
         }
     }
 
@@ -607,6 +844,7 @@ impl Driver {
                 role,
                 control,
                 closed,
+                pair,
             } => {
                 let peer = conn.peer();
                 let trusted = self.trust.get(&peer);
@@ -638,7 +876,7 @@ impl Driver {
                         peer,
                         trusted: trusted.is_some(),
                         granted: trusted.map(|t| t.granted).unwrap_or_default(),
-                        intent: Intent::Normal,
+                        pair,
                         session: SessionToken(session),
                     },
                 );
@@ -666,8 +904,29 @@ impl Driver {
                 }
             }
             Input::Revoke(peer) => self.core.revoke(&peer),
+            Input::SetGrants(peer, granted) => self.core.set_grants(&peer, granted),
+            Input::OpenPairing(reply) => {
+                let result = self
+                    .core
+                    .open_pairing(now, bridge_core::PAIRING_WINDOW)
+                    .map(|(code, qr)| (code, qr, bridge_core::PAIRING_WINDOW))
+                    .map_err(|e| e.to_string());
+                let _ = reply.send(result);
+            }
+            Input::ClosePairing => self.core.close_pairing(),
             Input::Shutdown(_) => {}
         }
+    }
+
+    /// The TLS verifier lets unknown certificates in only while the core's window is open.
+    fn sync_pairing_window(&self) {
+        let now = self.now();
+        let until = self
+            .core
+            .pairing_expires()
+            .filter(|_| self.core.pairing_open(now))
+            .map(|e| (self.start + e.as_duration()).into_std());
+        self.trust.set_pairing_until(until);
     }
 
     fn execute(&mut self) {
@@ -687,24 +946,69 @@ impl Driver {
                 Action::Close { conn, code, reason } => {
                     if let Some(e) = self.conns.get(&conn) {
                         debug!(peer = %e.conn.peer(), ?code, "closing: {reason}");
-                        e.conn.close(code, &reason);
+                        let flushed = e.writers.get(&ChannelClass::Control).is_some_and(|w| {
+                            w.send(WriterMsg::CloseAfter {
+                                conn: e.conn.clone(),
+                                code,
+                                reason: reason.clone(),
+                            })
+                            .is_ok()
+                        });
+                        let c = e.conn.clone();
+                        if flushed {
+                            // Fallback in case the control stream is stuck.
+                            tokio::spawn(async move {
+                                tokio::time::sleep(CLOSE_FLUSH_LIMIT * 2).await;
+                                c.close(code, &reason);
+                            });
+                        } else {
+                            c.close(code, &reason);
+                        }
                     }
                 }
                 Action::Event(event) => {
-                    peers_changed |=
-                        matches!(event, CoreEvent::PeerUp(_) | CoreEvent::PeerDown { .. });
-                    if matches!(event, CoreEvent::Clock { .. }) {
-                        peers_changed = true;
-                    }
-                    if let CoreEvent::Rejected { code, message, .. } = &event {
-                        warn!(?code, "connection rejected: {message}");
-                    }
+                    peers_changed |= matches!(
+                        event,
+                        CoreEvent::PeerUp(_) | CoreEvent::PeerDown { .. } | CoreEvent::Clock { .. }
+                    );
+                    self.on_event(&event);
                     let _ = self.events.send(NodeEvent::Core(event));
                 }
             }
         }
         if peers_changed {
             self.refresh_status();
+        }
+    }
+
+    fn on_event(&self, event: &CoreEvent) {
+        match event {
+            CoreEvent::Paired { peer, role, .. } => {
+                info!(%peer, ?role, "paired");
+                if self.trust.get(peer).is_none() {
+                    self.trust.insert(TrustedPeer::own_device(*peer));
+                }
+            }
+            CoreEvent::PeerUp(p) => {
+                let addr = self
+                    .conns
+                    .values()
+                    .find(|c| c.conn.peer() == p.id)
+                    .map(|c| c.conn.remote())
+                    .map(|PeerAddr::Ip(a)| a);
+                self.trust.note_seen(&p.id, &p.name, addr);
+            }
+            CoreEvent::Unpaired { peer } => {
+                info!(%peer, "the peer revoked our pairing");
+                self.trust.remove(peer);
+            }
+            CoreEvent::Rejected { code, message, .. } => {
+                warn!(?code, "connection rejected: {message}")
+            }
+            CoreEvent::PairingFailed { peer, reason, .. } => {
+                warn!(%peer, "pairing failed: {reason}")
+            }
+            _ => {}
         }
     }
 
@@ -732,7 +1036,7 @@ impl Driver {
             });
             tx
         });
-        let _ = writer.send(frame);
+        let _ = writer.send(WriterMsg::Frame(frame));
     }
 
     fn refresh_status(&mut self) {

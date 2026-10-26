@@ -5,13 +5,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use bridge_daemon::{NodeBuilder, TrustStore, TrustedPeer, bind_transport, ipc_handler};
+use bridge_daemon::{NodeBuilder, TrustStore, bind_transport, ipc_handler};
+use bridge_discovery::MdnsDiscovery;
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
 use bridge_transport::DeviceIdentity;
 use clap::Parser;
 use tokio::sync::Notify;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "bridged", version, about = "Bridge background service")]
@@ -21,15 +22,18 @@ struct Args {
     name: Option<String>,
     #[arg(long, default_value = "0.0.0.0:47800")]
     listen: SocketAddr,
-    /// Where the identity and settings live (defaults to the per-user data directory).
+    /// Where the identity, trust store and settings live (default: per-user data directory).
     #[arg(long)]
     data_dir: Option<PathBuf>,
-    /// Trust a device by its full id (temporary until pairing lands in milestone 3).
-    #[arg(long = "trust", value_name = "DEVICE_ID")]
-    trust: Vec<String>,
-    /// Keep a connection to ADDR, expecting DEVICE_ID there: `ADDR=DEVICE_ID`.
+    /// Keep a connection to a paired device at ADDR: `ADDR=DEVICE_ID` (manual add by IP).
     #[arg(long = "connect", value_name = "ADDR=DEVICE_ID")]
     connect: Vec<String>,
+    /// Do not announce or browse with mDNS (manual addresses only).
+    #[arg(long)]
+    no_mdns: bool,
+    /// Announce only the fingerprint, not the device name.
+    #[arg(long)]
+    hide_name: bool,
     /// IPC endpoint (named pipe or socket path).
     #[arg(long)]
     ipc: Option<String>,
@@ -68,20 +72,20 @@ async fn run(args: Args) -> Result<(), String> {
     let identity =
         DeviceIdentity::load_or_create(&data_dir.join("identity")).map_err(|e| e.to_string())?;
     let id = identity.id();
-
-    let mut trusted = Vec::new();
-    for t in &args.trust {
-        let peer = DeviceId::from_base32(t).ok_or_else(|| format!("invalid device id {t}"))?;
-        trusted.push(TrustedPeer::own_device(peer));
-    }
-    let trust = TrustStore::new(trusted);
+    let trust =
+        TrustStore::open(&data_dir.join("trust.toml")).map_err(|e| format!("trust store: {e}"))?;
 
     let name = args.name.unwrap_or_else(host_name);
     let transport =
         bind_transport(args.listen, identity, trust.clone()).map_err(|e| e.to_string())?;
-    let node = NodeBuilder::new(name.clone(), trust)
-        .start(transport)
-        .map_err(|e| e.to_string())?;
+    let mut builder = NodeBuilder::new(name.clone(), trust).hide_name(args.hide_name);
+    if !args.no_mdns {
+        match MdnsDiscovery::start(id) {
+            Ok(d) => builder = builder.discovery(d),
+            Err(e) => warn!("mDNS is unavailable, only manual addresses will work: {e}"),
+        }
+    }
+    let node = builder.start(transport).map_err(|e| e.to_string())?;
     info!(device = %id.to_base32(), %name, listen = %node.status().listen, "bridged started");
 
     for c in &args.connect {
@@ -93,6 +97,10 @@ async fn run(args: Args) -> Result<(), String> {
             .map_err(|e| format!("bad address {addr}: {e}"))?;
         let peer =
             DeviceId::from_base32(peer).ok_or_else(|| format!("invalid device id {peer}"))?;
+        if node.trust().get(&peer).is_none() {
+            warn!(%peer, "--connect ignored: the device is not paired");
+            continue;
+        }
         node.dial(addr, peer);
     }
 

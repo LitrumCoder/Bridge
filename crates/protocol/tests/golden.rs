@@ -129,6 +129,15 @@ fn samples() -> Vec<(&'static str, ControlMessage)> {
             .into(),
         ),
         ("unpaired", Unpaired.into()),
+        (
+            "pair_start",
+            PairStart {
+                method: PairMethod::Code,
+                spake: BoundedVec::try_from_vec(vec![0x41; 33]).expect("fits"),
+            }
+            .into(),
+        ),
+        ("pair_confirm", PairConfirm { mac: [0x5c; 32] }.into()),
     ]
 }
 

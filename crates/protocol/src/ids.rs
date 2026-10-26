@@ -38,6 +38,16 @@ impl fmt::Display for DeviceId {
     }
 }
 
+/// Lowercase RFC 4648 base32 without padding, as used in ids and pairing URIs.
+pub fn base32_encode(bytes: &[u8]) -> String {
+    base32(bytes)
+}
+
+/// Inverse of [`base32_encode`]; case-insensitive, rejects non-canonical input.
+pub fn base32_decode(s: &str) -> Option<Vec<u8>> {
+    unbase32(s)
+}
+
 fn base32(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
     let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);

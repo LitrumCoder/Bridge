@@ -6,5 +6,5 @@
 pub mod cluster;
 pub mod netsim;
 
-pub use cluster::{NodeSpec, TestNode, mutually_trusting, test_options};
+pub use cluster::{NodeSpec, TestNode, mutually_trusting, strangers, test_options};
 pub use netsim::{LinkConfig, NetStats, Network, SimSocket};

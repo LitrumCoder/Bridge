@@ -25,7 +25,9 @@ pub use channel::{ChannelClass, CloseCode};
 pub use envelope::{DATAGRAM_FORMAT, Envelope, EnvelopeRef, decode_datagram, encode_datagram};
 pub use error::{DecodeError, EncodeError};
 pub use frame::{FrameDecoder, encode_frame};
-pub use ids::{DeviceId, FeatureId, PermissionId, Platform, SessionToken};
+pub use ids::{
+    DeviceId, FeatureId, PermissionId, Platform, SessionToken, base32_decode, base32_encode,
+};
 pub use message::{Validate, decode_payload, encode_payload};
 pub use version::{
     FeatureDescriptor, IncompatibleVersion, NegotiatedFeature, PROTOCOL_VERSION, ProtocolVersion,
