@@ -8,6 +8,18 @@ repository.workspace = true
 
 [dependencies]
 bridge-protocol.workspace = true
+interprocess = { version = "2.4.7", features = ["tokio"] }
+postcard = { workspace = true, features = ["use-std"] }
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring = "1.2.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "time"] }
 
 [lints]
 workspace = true

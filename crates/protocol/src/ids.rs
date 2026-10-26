@@ -12,6 +12,12 @@ impl DeviceId {
         base32(&self.0)
     }
 
+    /// Parses the full 52-character base32 form (case-insensitive).
+    pub fn from_base32(s: &str) -> Option<Self> {
+        let bytes = unbase32(s)?;
+        Some(Self(bytes.try_into().ok()?))
+    }
+
     /// Short fingerprint shown to users: the first 8 base32 characters (40 bits).
     pub fn fingerprint(&self) -> String {
         let mut s = self.to_base32();
@@ -49,6 +55,27 @@ fn base32(bytes: &[u8]) -> String {
         out.push(ALPHABET[((buffer << (5 - bits)) & 31) as usize] as char);
     }
     out
+}
+
+fn unbase32(s: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(s.len() * 5 / 8);
+    let mut buffer: u32 = 0;
+    let mut bits = 0;
+    for c in s.bytes() {
+        let v = match c.to_ascii_lowercase() {
+            b @ b'a'..=b'z' => b - b'a',
+            b @ b'2'..=b'7' => b - b'2' + 26,
+            _ => return None,
+        };
+        buffer = (buffer << 5) | u32::from(v);
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buffer >> bits) as u8);
+        }
+    }
+    // Leftover bits must be padding zeros, otherwise the text is not canonical.
+    (buffer & ((1 << bits) - 1) == 0).then_some(out)
 }
 
 /// Feature a message belongs to. Ranges: 0 core, 1..=255 built-in,
@@ -143,6 +170,22 @@ mod tests {
         assert_eq!(base32(b"foob"), "mzxw6yq");
         assert_eq!(base32(b"fooba"), "mzxw6ytb");
         assert_eq!(base32(b"foobar"), "mzxw6ytboi");
+    }
+
+    #[test]
+    fn base32_parses_back() {
+        for data in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+            assert_eq!(unbase32(&base32(data)).as_deref(), Some(data));
+        }
+        let id = DeviceId([0x5a; 32]);
+        assert_eq!(DeviceId::from_base32(&id.to_base32()), Some(id));
+        assert_eq!(
+            DeviceId::from_base32(&id.to_base32().to_uppercase()),
+            Some(id)
+        );
+        assert_eq!(DeviceId::from_base32("abc1"), None);
+        assert_eq!(DeviceId::from_base32("mzxw6"), None);
+        assert_eq!(unbase32("mz"), None);
     }
 
     #[test]

@@ -1,0 +1,704 @@
+//! Two `Core`s wired back to back without any transport.
+
+#![allow(clippy::unwrap_used)]
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bridge_core::*;
+use bridge_protocol::control::{DeviceState, Intent, StateReason};
+use bridge_protocol::{
+    ChannelClass, CloseCode, DeviceId, FeatureId, PROTOCOL_VERSION, PermissionId, Platform,
+    ProtocolVersion, SessionToken,
+};
+use serde::{Deserialize, Serialize};
+
+const ECHO: FeatureId = FeatureId(200);
+
+#[derive(Serialize, Deserialize)]
+struct Note(u32);
+
+impl bridge_protocol::Validate for Note {}
+
+#[derive(Default)]
+struct Log {
+    events: Vec<String>,
+}
+
+struct Echo {
+    log: Arc<Mutex<Log>>,
+    permission: Option<PermissionId>,
+}
+
+impl Feature for Echo {
+    fn info(&self) -> FeatureInfo {
+        FeatureInfo {
+            id: ECHO,
+            name: "echo",
+            versions: 1..=2,
+            channel: ChannelClass::Clipboard,
+            permission: self.permission,
+        }
+    }
+
+    fn on_peer_up(&mut self, cx: &mut FeatureCx<'_>, peer: PeerId, version: u16) {
+        self.log
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("up {} v{version}", peer.fingerprint()));
+        assert!(cx.peer(&peer).is_some());
+    }
+
+    fn on_peer_down(&mut self, _cx: &mut FeatureCx<'_>, peer: PeerId, reason: PeerDownReason) {
+        self.log
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("down {} {reason:?}", peer.fingerprint()));
+    }
+
+    fn on_message(
+        &mut self,
+        cx: &mut FeatureCx<'_>,
+        peer: PeerId,
+        kind: u16,
+        payload: &[u8],
+    ) -> Result<(), FeatureError> {
+        let Note(n) = decode(payload)?;
+        if n == 666 {
+            return Err(FeatureError::Violation("evil number".into()));
+        }
+        self.log
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("msg {kind} {n}"));
+        if kind == 1 {
+            cx.send(peer, 2, &Note(n + 1)).unwrap();
+        }
+        Ok(())
+    }
+
+    fn on_datagram(
+        &mut self,
+        _cx: &mut FeatureCx<'_>,
+        _peer: PeerId,
+        payload: &[u8],
+    ) -> Result<(), FeatureError> {
+        self.log
+            .lock()
+            .unwrap()
+            .events
+            .push(format!("dgram {payload:?}"));
+        Ok(())
+    }
+}
+
+struct Node {
+    core: Core,
+    log: Arc<Mutex<Log>>,
+    id: DeviceId,
+}
+
+fn node(byte: u8, protocol: ProtocolVersion, permission: Option<PermissionId>) -> Node {
+    let id = DeviceId([byte; 32]);
+    let log = Arc::new(Mutex::new(Log::default()));
+    let mut registry = FeatureRegistry::new();
+    registry
+        .register(Box::new(Echo {
+            log: log.clone(),
+            permission,
+        }))
+        .unwrap();
+    let config = CoreConfig {
+        device_id: id,
+        name: format!("node-{byte}"),
+        platform: Platform::LINUX,
+        app_version: "0.1.0".into(),
+        protocol,
+    };
+    Node {
+        core: Core::new(config, registry),
+        log,
+        id,
+    }
+}
+
+/// A bidirectional link between two cores: `a` sees conn `ca`, `b` sees conn `cb`.
+struct Link {
+    ca: ConnId,
+    cb: ConnId,
+}
+
+#[derive(Default)]
+struct Outcome {
+    events_a: Vec<CoreEvent>,
+    events_b: Vec<CoreEvent>,
+    closed: Vec<(char, CloseCode, String)>,
+}
+
+/// Both ends of a link use ids `n` and `n + 1000`.
+fn far_end(conn: ConnId) -> ConnId {
+    if conn.0 >= 1000 {
+        ConnId(conn.0 - 1000)
+    } else {
+        ConnId(conn.0 + 1000)
+    }
+}
+
+/// Moves actions between the two cores until both are quiet.
+fn pump(a: &mut Node, b: &mut Node, _link: &Link, now: Micros) -> Outcome {
+    let mut out = Outcome::default();
+    loop {
+        let mut moved = false;
+        while let Some(act) = a.core.poll_action() {
+            moved = true;
+            deliver(act, 'a', a, b, now, &mut out.events_a, &mut out.closed);
+        }
+        while let Some(act) = b.core.poll_action() {
+            moved = true;
+            deliver(act, 'b', b, a, now, &mut out.events_b, &mut out.closed);
+        }
+        if !moved {
+            return out;
+        }
+    }
+}
+
+fn deliver(
+    act: Action,
+    side: char,
+    me: &mut Node,
+    other: &mut Node,
+    now: Micros,
+    events: &mut Vec<CoreEvent>,
+    closed: &mut Vec<(char, CloseCode, String)>,
+) {
+    match act {
+        Action::Send {
+            conn,
+            channel,
+            envelope,
+        } => other
+            .core
+            .handle_frame(now, far_end(conn), channel, &envelope),
+        Action::SendDatagram { conn, bytes } => {
+            other.core.handle_datagram(now, far_end(conn), &bytes)
+        }
+        Action::Close { conn, code, reason } => {
+            closed.push((side, code, reason));
+            me.core.handle_closed(now, conn, Some(code));
+            other.core.handle_closed(now, far_end(conn), Some(code));
+        }
+        Action::Event(e) => events.push(e),
+    }
+}
+
+fn info(
+    conn: u64,
+    role: Role,
+    peer: DeviceId,
+    trusted: bool,
+    granted: &[PermissionId],
+) -> ConnectInfo {
+    ConnectInfo {
+        conn: ConnId(conn),
+        role,
+        peer,
+        trusted,
+        granted: granted.to_vec(),
+        intent: Intent::Normal,
+        session: SessionToken([conn as u8; 16]),
+    }
+}
+
+fn connect(a: &mut Node, b: &mut Node, conn: u64, trusted: bool, now: Micros) -> (Link, Outcome) {
+    let link = Link {
+        ca: ConnId(conn),
+        cb: ConnId(conn + 1000),
+    };
+    let all = [PermissionId::CLIPBOARD];
+    a.core
+        .handle_connected(now, info(conn, Role::Initiator, b.id, true, &all));
+    b.core
+        .handle_connected(now, info(conn + 1000, Role::Responder, a.id, trusted, &all));
+    let out = pump(a, b, &link, now);
+    (link, out)
+}
+
+fn has_peer_up(events: &[CoreEvent], id: DeviceId) -> bool {
+    events
+        .iter()
+        .any(|e| matches!(e, CoreEvent::PeerUp(p) if p.id == id))
+}
+
+#[test]
+fn handshake_activates_both_sides_and_negotiates_features() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (_, out) = connect(&mut a, &mut b, 1, true, Micros(1));
+    assert!(has_peer_up(&out.events_a, b.id));
+    assert!(has_peer_up(&out.events_b, a.id));
+    let peers = a.core.peers();
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].name, "node-2");
+    assert_eq!(peers[0].features[0].id, ECHO);
+    assert_eq!(peers[0].features[0].version, 2);
+    assert!(
+        a.log
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.starts_with("up"))
+    );
+    assert!(out.closed.is_empty());
+}
+
+#[test]
+fn feature_messages_and_datagrams_reach_the_peer_feature() {
+    let mut a = node(1, PROTOCOL_VERSION, Some(PermissionId::CLIPBOARD));
+    let mut b = node(2, PROTOCOL_VERSION, Some(PermissionId::CLIPBOARD));
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1));
+
+    let env = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 1,
+        payload: bridge_protocol::encode_payload(&Note(41)).unwrap(),
+    };
+    b.core
+        .handle_frame(Micros(2), link.cb, ChannelClass::Clipboard, &env.to_bytes());
+    pump(&mut a, &mut b, &link, Micros(2));
+    assert!(
+        b.log
+            .lock()
+            .unwrap()
+            .events
+            .contains(&"msg 1 41".to_string())
+    );
+    assert!(
+        a.log
+            .lock()
+            .unwrap()
+            .events
+            .contains(&"msg 2 42".to_string())
+    );
+
+    let dgram = bridge_protocol::encode_datagram(ECHO, &[7, 8]);
+    a.core.handle_datagram(Micros(3), link.ca, &dgram);
+    assert!(
+        a.log
+            .lock()
+            .unwrap()
+            .events
+            .contains(&"dgram [7, 8]".to_string())
+    );
+}
+
+#[test]
+fn messages_without_our_permission_are_dropped() {
+    let mut a = node(1, PROTOCOL_VERSION, Some(PermissionId::FILES));
+    let mut b = node(2, PROTOCOL_VERSION, Some(PermissionId::FILES));
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1));
+    let env = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 3,
+        payload: bridge_protocol::encode_payload(&Note(1)).unwrap(),
+    };
+    a.core
+        .handle_frame(Micros(2), link.ca, ChannelClass::Clipboard, &env.to_bytes());
+    assert!(
+        !a.log
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.starts_with("msg"))
+    );
+    assert_eq!(a.core.stats().not_permitted, 1);
+}
+
+#[test]
+fn incompatible_major_version_is_rejected_with_reason() {
+    let mut a = node(1, ProtocolVersion { major: 2, minor: 0 }, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (_, out) = connect(&mut a, &mut b, 1, true, Micros(1));
+    let rejected = out.events_a.iter().find_map(|e| match e {
+        CoreEvent::Rejected {
+            code,
+            protocol,
+            message,
+            ..
+        } => Some((*code, *protocol, message.clone())),
+        _ => None,
+    });
+    let (code, protocol, message) = rejected.expect("initiator learns why");
+    assert_eq!(code, CloseCode::INCOMPATIBLE_VERSION);
+    assert_eq!(protocol, PROTOCOL_VERSION);
+    assert!(message.contains("2.0"));
+    assert!(a.core.peers().is_empty() && b.core.peers().is_empty());
+}
+
+#[test]
+fn untrusted_device_is_refused() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (_, out) = connect(&mut a, &mut b, 1, false, Micros(1));
+    assert!(out.events_a.iter().any(|e| matches!(
+        e,
+        CoreEvent::Rejected {
+            code: CloseCode::NOT_PAIRED,
+            ..
+        }
+    )));
+    assert!(b.core.peers().is_empty());
+}
+
+#[test]
+fn pairing_intent_is_refused_until_pairing_exists() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let link = Link {
+        ca: ConnId(1),
+        cb: ConnId(1001),
+    };
+    let mut ia = info(1, Role::Initiator, b.id, true, &[]);
+    ia.intent = Intent::Pair;
+    a.core.handle_connected(Micros(1), ia);
+    b.core
+        .handle_connected(Micros(1), info(1001, Role::Responder, a.id, false, &[]));
+    let out = pump(&mut a, &mut b, &link, Micros(1));
+    assert!(out.events_a.iter().any(|e| matches!(
+        e,
+        CoreEvent::Rejected {
+            code: CloseCode::PAIRING_FAILED,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn hello_with_foreign_identity_is_a_violation() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let link = Link {
+        ca: ConnId(1),
+        cb: ConnId(1001),
+    };
+    a.core
+        .handle_connected(Micros(1), info(1, Role::Initiator, b.id, true, &[]));
+    // B's TLS layer claims the peer is device 9, but the hello says device 1.
+    b.core.handle_connected(
+        Micros(1),
+        info(1001, Role::Responder, DeviceId([9; 32]), true, &[]),
+    );
+    let out = pump(&mut a, &mut b, &link, Micros(1));
+    assert!(
+        out.closed
+            .iter()
+            .any(|(s, c, _)| *s == 'b' && *c == CloseCode::PROTOCOL_VIOLATION)
+    );
+}
+
+#[test]
+fn feature_message_before_handshake_is_a_violation() {
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    b.core.handle_connected(
+        Micros(1),
+        info(2, Role::Responder, DeviceId([1; 32]), true, &[]),
+    );
+    let env = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 1,
+        payload: vec![1],
+    };
+    b.core.handle_frame(
+        Micros(1),
+        ConnId(2),
+        ChannelClass::Clipboard,
+        &env.to_bytes(),
+    );
+    let act = std::iter::from_fn(|| b.core.poll_action()).collect::<Vec<_>>();
+    assert!(act.iter().any(|a| matches!(
+        a,
+        Action::Close {
+            code: CloseCode::PROTOCOL_VIOLATION,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn initiator_buffers_feature_traffic_that_overtakes_server_hello() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    a.core
+        .handle_connected(Micros(1), info(1, Role::Initiator, b.id, true, &[]));
+    b.core
+        .handle_connected(Micros(1), info(1001, Role::Responder, a.id, true, &[]));
+    let hello = std::iter::from_fn(|| a.core.poll_action()).collect::<Vec<_>>();
+    for act in hello {
+        if let Action::Send {
+            channel, envelope, ..
+        } = act
+        {
+            b.core
+                .handle_frame(Micros(1), ConnId(1001), channel, &envelope);
+        }
+    }
+    // B is active now. Deliver its feature traffic to A before its control frames.
+    let note = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 3,
+        payload: bridge_protocol::encode_payload(&Note(5)).unwrap(),
+    };
+    a.core.handle_frame(
+        Micros(2),
+        ConnId(1),
+        ChannelClass::Clipboard,
+        &note.to_bytes(),
+    );
+    a.core.handle_datagram(
+        Micros(2),
+        ConnId(1),
+        &bridge_protocol::encode_datagram(ECHO, &[1]),
+    );
+    assert!(a.log.lock().unwrap().events.is_empty());
+    let control: Vec<Action> = std::iter::from_fn(|| b.core.poll_action()).collect();
+    for act in control {
+        if let Action::Send {
+            channel, envelope, ..
+        } = act
+        {
+            a.core
+                .handle_frame(Micros(3), ConnId(1), channel, &envelope);
+        }
+    }
+    let log = a.log.lock().unwrap().events.clone();
+    assert!(log.contains(&"msg 3 5".to_string()), "{log:?}");
+    assert!(log.contains(&"dgram [1]".to_string()), "{log:?}");
+    assert_eq!(a.core.stats().violations, 0);
+}
+
+#[test]
+fn unbounded_early_traffic_is_a_violation() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    a.core.handle_connected(
+        Micros(1),
+        info(1, Role::Initiator, DeviceId([2; 32]), true, &[]),
+    );
+    let big = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 3,
+        payload: vec![0; 64 * 1024],
+    };
+    for _ in 0..5 {
+        a.core.handle_frame(
+            Micros(2),
+            ConnId(1),
+            ChannelClass::Clipboard,
+            &big.to_bytes(),
+        );
+    }
+    let acts: Vec<Action> = std::iter::from_fn(|| a.core.poll_action()).collect();
+    assert!(acts.iter().any(|x| matches!(
+        x,
+        Action::Close {
+            code: CloseCode::PROTOCOL_VIOLATION,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn feature_violation_closes_the_connection() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1));
+    let env = bridge_protocol::Envelope {
+        feature: ECHO,
+        kind: 1,
+        payload: bridge_protocol::encode_payload(&Note(666)).unwrap(),
+    };
+    b.core
+        .handle_frame(Micros(2), link.cb, ChannelClass::Clipboard, &env.to_bytes());
+    let out = pump(&mut a, &mut b, &link, Micros(2));
+    assert!(
+        out.closed
+            .iter()
+            .any(|(_, c, r)| *c == CloseCode::PROTOCOL_VIOLATION && r == "evil number")
+    );
+    assert!(
+        a.log
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.contains("down") && e.contains("Closed"))
+    );
+}
+
+#[test]
+fn handshake_times_out() {
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    b.core.handle_connected(
+        Micros(0),
+        info(2, Role::Responder, DeviceId([1; 32]), true, &[]),
+    );
+    assert_eq!(b.core.next_deadline(), Some(Micros(0) + HANDSHAKE_TIMEOUT));
+    b.core.handle_tick(Micros(0) + Duration::from_secs(4));
+    assert!(b.core.poll_action().is_none());
+    b.core.handle_tick(Micros(0) + HANDSHAKE_TIMEOUT);
+    assert!(
+        matches!(b.core.poll_action(), Some(Action::Close { reason, .. }) if reason == "handshake timeout")
+    );
+}
+
+#[test]
+fn leaving_close_reports_left_and_lost_without_code() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1));
+    a.core
+        .handle_closed(Micros(2), link.ca, Some(CloseCode::LEAVING));
+    assert!(matches!(
+        std::iter::from_fn(|| a.core.poll_action()).last(),
+        Some(Action::Event(CoreEvent::PeerDown {
+            reason: PeerDownReason::Left,
+            ..
+        }))
+    ));
+    b.core.handle_closed(Micros(2), link.cb, None);
+    assert!(
+        b.log
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.ends_with("Lost"))
+    );
+}
+
+#[test]
+fn duplicate_connections_keep_the_one_dialled_by_the_smaller_id() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    // B (larger id) dials first, then A dials: A's connection must win.
+    let (_l1, _) = connect(&mut b, &mut a, 10, true, Micros(1));
+    let (l2, out) = connect(&mut a, &mut b, 20, true, Micros(2));
+    assert_eq!(a.core.peers().len(), 1);
+    assert_eq!(b.core.peers().len(), 1);
+    assert!(
+        out.closed
+            .iter()
+            .any(|(_, c, r)| *c == CloseCode::NORMAL && r.contains("replaced"))
+    );
+
+    // A third connection dialled by B now loses against A's.
+    let (_, out3) = connect(&mut b, &mut a, 30, true, Micros(3));
+    assert!(
+        out3.closed
+            .iter()
+            .any(|(_, _, r)| r == "duplicate connection")
+    );
+    assert_eq!(a.core.peers().len(), 1);
+    let _ = l2;
+}
+
+#[test]
+fn clock_pings_produce_estimates_and_device_status_is_forwarded() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1_000));
+    a.core.handle_tick(Micros(2_000));
+    let out = pump(&mut a, &mut b, &link, Micros(2_400));
+    let est = a.core.clock(&b.id).expect("estimate after one exchange");
+    assert_eq!(est.samples, 1);
+    assert!(
+        out.events_a
+            .iter()
+            .any(|e| matches!(e, CoreEvent::Clock { .. }))
+    );
+    assert!(a.core.next_deadline().is_some());
+
+    b.core
+        .set_local_state(Micros(3_000), DeviceState::Paused, StateReason::USER);
+    let out = pump(&mut a, &mut b, &link, Micros(3_000));
+    assert!(out.events_a.iter().any(|e| matches!(
+        e,
+        CoreEvent::PeerState {
+            state: DeviceState::Paused,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn revoke_sends_unpaired_and_closes() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(1));
+    let b_id = b.id;
+    a.core.revoke(&b_id);
+    let out = pump(&mut a, &mut b, &link, Micros(2));
+    assert!(
+        out.events_b
+            .iter()
+            .any(|e| matches!(e, CoreEvent::Unpaired { .. }))
+    );
+    assert!(out.closed.iter().any(|(_, c, _)| *c == CloseCode::REVOKED));
+    assert!(
+        b.log
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.ends_with("Revoked"))
+    );
+}
+
+#[test]
+fn registry_rejects_reserved_duplicate_and_empty_features() {
+    struct Bad(FeatureId, std::ops::RangeInclusive<u16>);
+    impl Feature for Bad {
+        fn info(&self) -> FeatureInfo {
+            FeatureInfo {
+                id: self.0,
+                name: "bad",
+                versions: self.1.clone(),
+                channel: ChannelClass::Control,
+                permission: None,
+            }
+        }
+        fn on_peer_up(&mut self, _: &mut FeatureCx<'_>, _: PeerId, _: u16) {}
+        fn on_peer_down(&mut self, _: &mut FeatureCx<'_>, _: PeerId, _: PeerDownReason) {}
+        fn on_message(
+            &mut self,
+            _: &mut FeatureCx<'_>,
+            _: PeerId,
+            _: u16,
+            _: &[u8],
+        ) -> Result<(), FeatureError> {
+            Ok(())
+        }
+    }
+    let mut r = FeatureRegistry::new();
+    assert_eq!(
+        r.register(Box::new(Bad(FeatureId::CORE, 1..=1))),
+        Err(RegistryError::Reserved(FeatureId::CORE))
+    );
+    #[allow(clippy::reversed_empty_ranges)]
+    let empty = 2..=1;
+    assert_eq!(
+        r.register(Box::new(Bad(FeatureId(5), empty))),
+        Err(RegistryError::EmptyVersions(FeatureId(5)))
+    );
+    assert!(r.register(Box::new(Bad(FeatureId(5), 1..=1))).is_ok());
+    assert_eq!(
+        r.register(Box::new(Bad(FeatureId(5), 1..=1))),
+        Err(RegistryError::Duplicate(FeatureId(5)))
+    );
+    assert_eq!(r.len(), 1);
+    assert!(!r.is_empty());
+}

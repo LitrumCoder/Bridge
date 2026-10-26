@@ -6,6 +6,13 @@ edition.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[lib]
+name = "bridge_daemon"
+
+[[bin]]
+name = "bridged"
+path = "src/main.rs"
+
 [dependencies]
 bridge-protocol.workspace = true
 bridge-core.workspace = true
@@ -17,6 +24,13 @@ bridge-feature-clipboard.workspace = true
 bridge-feature-files.workspace = true
 bridge-feature-midi.workspace = true
 bridge-ipc.workspace = true
+bytes.workspace = true
+clap.workspace = true
+directories = "6.0.0"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

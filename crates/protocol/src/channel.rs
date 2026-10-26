@@ -40,6 +40,30 @@ impl ChannelClass {
     pub const fn is_datagram(self) -> bool {
         matches!(self, Self::InputMotion)
     }
+
+    /// First byte of every QUIC stream: tells the receiver which channel it carries.
+    pub const fn stream_tag(self) -> u8 {
+        match self {
+            Self::Control => 0,
+            Self::InputEvents => 1,
+            Self::Midi => 2,
+            Self::Clipboard => 3,
+            Self::Bulk => 4,
+            Self::InputMotion => 5,
+        }
+    }
+
+    /// Classes that may arrive on a stream; datagram-only classes are refused.
+    pub const fn from_stream_tag(tag: u8) -> Option<Self> {
+        match tag {
+            0 => Some(Self::Control),
+            1 => Some(Self::InputEvents),
+            2 => Some(Self::Midi),
+            3 => Some(Self::Clipboard),
+            4 => Some(Self::Bulk),
+            _ => None,
+        }
+    }
 }
 
 /// QUIC application close code (ARCHITECTURE §3.4).
@@ -91,6 +115,19 @@ mod tests {
         }
         assert!(ChannelClass::InputMotion.is_datagram());
         assert!(!ChannelClass::Bulk.is_datagram());
+    }
+
+    #[test]
+    fn stream_tags_roundtrip_except_datagram_classes() {
+        for c in ChannelClass::ALL {
+            let back = ChannelClass::from_stream_tag(c.stream_tag());
+            if c.is_datagram() {
+                assert_eq!(back, None);
+            } else {
+                assert_eq!(back, Some(c));
+            }
+        }
+        assert_eq!(ChannelClass::from_stream_tag(200), None);
     }
 
     #[test]

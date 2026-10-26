@@ -9,7 +9,7 @@
 |---|---|---|---|
 | 0 | **Каркас и CI** | Workspace со всеми crates (трейты, пустые реализации с явными `TODO`), `deny.toml`, `rustfmt.toml`, `clippy.toml`, `xtask` (проверка направлений зависимостей, сравнение бенчмарков с целями), GitHub Actions: матрица Win/macOS/Linux, fmt, clippy `-D warnings`, deny, тесты, покрытие (порог включается с вехи 1) | CI зелёный на трёх ОС; `cargo deny` проходит с утверждёнными исключениями |
 | 1 | **Протокол** | `Envelope`, кадрирование, `Bounded*`-типы, сообщения ядра (Hello/Reject/State/Permissions/Layout/ClockSync), версии и согласование фич, коды закрытия; golden-файлы; proptest round-trip; fuzz-цели | покрытие `protocol` ≥ 85%, fuzz-smoke без паник |
-| 2 | **Ядро и транспорт** | `PeerSession`, `FeatureRegistry`, `FeatureCx`, `ChannelScheduler`, синхронизация часов; `Transport`/`Connection`, QUIC (quinn + rustls/ring), верификаторы сертификатов, interactive/bulk соединения, `mem`-транспорт; `testkit::netsim`; `bridge_node`, IPC, `bridged`, `bridge status/devices` | 2–3 узла рукопожатие на loopback; тест «несовместимая версия»; netsim-разрывы → переподключение |
+| 2 | **Ядро и транспорт** | `Core` (сессии, рукопожатие, маршрутизация), `FeatureRegistry`, `FeatureCx`, `ChannelScheduler`, синхронизация часов; `Transport`/`Connection`, QUIC (quinn + rustls/ring), верификаторы с закреплением отпечатков, interactive/bulk ALPN; `testkit::netsim` (виртуальный UDP-сокет для настоящего QUIC — заменил запланированный `mem`-транспорт: тесты идут на реальном стеке); `bridge_node`, IPC, `bridged`, `bridge status/devices/connect/shutdown` | 2–3 узла рукопожатие на loopback; тест «несовместимая версия»; netsim-разрывы → переподключение |
 | 3 | **Обнаружение и сопряжение** | mDNS, ручной IP, ключи и сертификаты, SPAKE2 по коду, QR, хранилище доверия, права, отзыв, `bridge pair` | тесты: сопряжение, неверный код, MITM-прокси, отказ неспаренному, отзыв |
 | 4a | **Ввод: логика** | Геометрия, `InputRouter`, `KeyTracker`, хоткеи, замена модификаторов, синхронизация раскладки, «встряхни мышь»; фича `input` на mock-платформе | proptest геометрии и залипаний; интеграционный переход туда-обратно; netsim без залипаний; бенчмарк задержки ввода |
 | 4b | **Ввод: Windows и X11** | LL-хуки + `SendInput`; XI2 + XFixes-барьеры + XTest; `ScreenInfo`; оверлеи краёв | Xvfb-тесты в CI; Windows-тесты инъекции на раннере; ручная проверка Win↔Linux |
@@ -41,7 +41,19 @@
 | Синхронизация папок, поиск по устройствам | Движок файлов с докачкой и хешами — основа |
 | Команды на естественном языке | IPC-API демона |
 
+## Статус вех
+
+| Веха | Статус |
+|---|---|
+| 0 | готово, коммит `0212083` |
+| 1 | готово, коммит `8f5082c` |
+| 2 | готово (см. git log); `bridged --trust` — временный способ доверия до вехи 3 |
+
 ## Отложено с этапа 1 (явные TODO)
+
+- Unix IPC: доступ ограничен правами каталога `0700`; проверка UID клиента (`SO_PEERCRED`/`getpeereid`) — TODO.
+- Лимит одновременных TLS-рукопожатий и rate limit по IP (сейчас есть только QUIC Retry) — веха 3.
+- Delay-based контроллер перегрузки для bulk-соединения — веха 6a.
 
 - Служба SYSTEM на Windows для управления окнами с повышенными правами и UAC (ADR-0005).
 - Хранение закрытого ключа в Keychain / DPAPI / Secret Service (ADR-0004).
