@@ -35,5 +35,7 @@ proptest! {
         payload in proptest::collection::vec(any::<u8>(), 0..256),
     ) {
         let _ = ControlMessage::decode(kind, &payload);
+        let _ = bridge_protocol::input::InputMessage::decode(kind, &payload);
+        let _ = bridge_protocol::decode_payload::<bridge_protocol::input::Motion>(&payload);
     }
 }

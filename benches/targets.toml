@@ -9,3 +9,10 @@ ci_factor = 2.0
 id = "codec/clock_pong_roundtrip"
 statistic = "median"
 max_ns = 400
+
+# Key press: OS hook on A → router → QUIC over 127.0.0.1 → core → injector on B.
+# Target from ADR-0014: p50 < 0.5 ms. Reference: 94 µs median (2026-10-26).
+[[bench]]
+id = "input/key_capture_to_injection_loopback"
+statistic = "median"
+max_ns = 500000

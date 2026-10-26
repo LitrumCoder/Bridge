@@ -7,8 +7,12 @@ use std::time::Duration;
 
 use bridge_protocol::control::{
     ClientHello, ClockPing, ClockPong, ControlMessage, DeviceState, DeviceStatus, Intent,
-    PairConfirm, PairStart, Permissions, Reject, ServerHello, StateReason, Unpaired,
+    LayoutDigest, LayoutRequest, LayoutUpdate, LayoutVersion, PairConfirm, PairStart, Permissions,
+    Reject, ScreenPlacement, ServerHello, StateReason, Unpaired,
 };
+use bridge_protocol::{DecodeError, Validate};
+
+use crate::layout::{LocalScreen, with_own_screens};
 use bridge_protocol::{
     BoundedString, BoundedVec, ChannelClass, CloseCode, DeviceId, Envelope, FeatureId,
     NegotiatedFeature, PermissionId, Platform, ProtocolVersion, SessionToken, check_compatibility,
@@ -118,6 +122,8 @@ pub enum CoreEvent {
         peer: PeerId,
         reason: String,
     },
+    /// The shared screen layout changed (locally or from a peer).
+    LayoutChanged(LayoutUpdate),
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -169,6 +175,7 @@ struct Session {
     deadline: Option<Micros>,
     peer: Option<PeerInfo>,
     remote_grants: Vec<PermissionId>,
+    remote_state: DeviceState,
     clock: ClockSync,
     next_ping: Micros,
     pings_sent: u32,
@@ -233,6 +240,9 @@ pub struct Core {
     stats: CoreStats,
     pairing: PairingWindow,
     entropy: Box<dyn Entropy>,
+    layout: Option<LayoutUpdate>,
+    local_screens: Vec<LocalScreen>,
+    lamport: u64,
 }
 
 impl Core {
@@ -249,7 +259,105 @@ impl Core {
             stats: CoreStats::default(),
             pairing: PairingWindow::default(),
             entropy,
+            layout: None,
+            local_screens: Vec::new(),
+            lamport: 0,
         }
+    }
+
+    pub fn layout(&self) -> Option<&LayoutUpdate> {
+        self.layout.as_ref()
+    }
+
+    /// This device's monitors changed (start, resolution, hot-plug).
+    pub fn set_local_screens(&mut self, now: Micros, screens: Vec<LocalScreen>) {
+        self.local_screens = screens;
+        let merged = with_own_screens(
+            self.layout.as_ref(),
+            self.config.device_id,
+            &self.local_screens,
+        );
+        if self
+            .layout
+            .as_ref()
+            .is_none_or(|l| *l.screens != merged[..])
+        {
+            self.publish_layout(now, merged);
+        }
+    }
+
+    /// A new arrangement from the layout editor.
+    pub fn set_layout(
+        &mut self,
+        now: Micros,
+        screens: Vec<ScreenPlacement>,
+    ) -> Result<(), DecodeError> {
+        let screens =
+            BoundedVec::try_from_vec(screens).map_err(|_| DecodeError::TooLong { max: 64 })?;
+        let candidate = LayoutUpdate {
+            version: LayoutVersion {
+                counter: 0,
+                device: self.config.device_id,
+            },
+            screens,
+        };
+        candidate.validate()?;
+        self.publish_layout(now, candidate.screens.into_vec());
+        Ok(())
+    }
+
+    fn publish_layout(&mut self, now: Micros, screens: Vec<ScreenPlacement>) {
+        self.lamport += 1;
+        let update = LayoutUpdate {
+            version: LayoutVersion {
+                counter: self.lamport,
+                device: self.config.device_id,
+            },
+            screens: BoundedVec::try_from_vec(screens).unwrap_or_default(),
+        };
+        let active: Vec<ConnId> = self.primary.values().copied().collect();
+        for conn in active {
+            self.send_control(conn, update.clone().into());
+        }
+        self.layout_changed(now, update);
+    }
+
+    fn layout_changed(&mut self, now: Micros, update: LayoutUpdate) {
+        self.layout = Some(update.clone());
+        self.actions
+            .push_back(Action::Event(CoreEvent::LayoutChanged(update.clone())));
+        for id in self.registry.ids() {
+            self.dispatch_simple(now, id, |f, cx| f.on_layout(cx, &update));
+        }
+    }
+
+    fn adopt_layout(&mut self, now: Micros, update: LayoutUpdate) {
+        if self
+            .layout
+            .as_ref()
+            .is_some_and(|l| l.version >= update.version)
+        {
+            return;
+        }
+        self.lamport = self.lamport.max(update.version.counter);
+        let merged = with_own_screens(Some(&update), self.config.device_id, &self.local_screens);
+        if self.local_screens.is_empty() || *update.screens == merged[..] {
+            self.layout_changed(now, update);
+        } else {
+            // The peer's layout lacks our current screens: add them as a newer version.
+            self.layout = Some(update);
+            self.publish_layout(now, merged);
+        }
+    }
+
+    /// An event from outside the network (e.g. the input hook) for one feature.
+    pub fn handle_local(
+        &mut self,
+        now: Micros,
+        feature: FeatureId,
+        event: Box<dyn std::any::Any + Send>,
+    ) {
+        self.dispatch_simple(now, feature, |f, cx| f.on_local(cx, event));
     }
 
     /// Opens the pairing window and returns the fresh code and QR secret to show.
@@ -346,6 +454,7 @@ impl Core {
             deadline: Some(now + HANDSHAKE_TIMEOUT),
             peer: None,
             remote_grants: Vec::new(),
+            remote_state: DeviceState::Connected,
             clock: ClockSync::new(),
             next_ping: now,
             pings_sent: 0,
@@ -619,12 +728,16 @@ impl Core {
                 self.close(conn, r.code, "rejected by peer");
             }
             (Phase::Active, ControlMessage::DeviceStatus(st)) => {
+                if let Some(s) = self.sessions.get_mut(&conn) {
+                    s.remote_state = st.state;
+                }
                 if let Some(peer) = self.active_primary_peer(conn) {
                     self.actions.push_back(Action::Event(CoreEvent::PeerState {
                         peer,
                         state: st.state,
                         reason: st.reason,
                     }));
+                    self.peer_updated(now, conn, peer);
                 }
             }
             (Phase::Active, ControlMessage::Permissions(p)) => {
@@ -636,6 +749,9 @@ impl Core {
                             peer,
                             granted: p.granted.into_vec(),
                         }));
+                    if self.active_primary_peer(conn) == Some(peer) {
+                        self.peer_updated(now, conn, peer);
+                    }
                 }
             }
             (Phase::Active, ControlMessage::ClockPing(p)) => {
@@ -662,13 +778,18 @@ impl Core {
                     }
                 }
             }
-            // TODO(M4a): layout synchronisation.
-            (
-                Phase::Active,
-                ControlMessage::LayoutDigest(_)
-                | ControlMessage::LayoutRequest(_)
-                | ControlMessage::LayoutUpdate(_),
-            ) => {}
+            (Phase::Active, ControlMessage::LayoutDigest(d)) => match &self.layout {
+                None => self.send_control(conn, LayoutRequest.into()),
+                Some(l) if l.version > d.version => self.send_control(conn, l.clone().into()),
+                Some(l) if l.version < d.version => self.send_control(conn, LayoutRequest.into()),
+                Some(_) => {}
+            },
+            (Phase::Active, ControlMessage::LayoutRequest(_)) => {
+                if let Some(l) = self.layout.clone() {
+                    self.send_control(conn, l.into());
+                }
+            }
+            (Phase::Active, ControlMessage::LayoutUpdate(u)) => self.adopt_layout(now, u),
             (Phase::Active, ControlMessage::Unpaired(_)) => {
                 if let Some(s) = self.sessions.get(&conn) {
                     let peer = s.info.peer;
@@ -911,6 +1032,10 @@ impl Core {
             let version = f.version;
             self.dispatch_simple(now, f.id, |feat, cx| feat.on_peer_up(cx, peer_id, version));
         }
+        if let Some(l) = &self.layout {
+            let digest = LayoutDigest { version: l.version };
+            self.send_control(conn, digest.into());
+        }
         let early = self
             .sessions
             .get_mut(&conn)
@@ -938,6 +1063,18 @@ impl Core {
             .push_back(Action::Event(CoreEvent::PeerDown { peer, reason }));
         for f in info.map(|i| i.features.clone()).unwrap_or_default() {
             self.dispatch_simple(now, f.id, |feat, cx| feat.on_peer_down(cx, peer, reason));
+        }
+    }
+
+    fn peer_updated(&mut self, now: Micros, conn: ConnId, peer: PeerId) {
+        let features: Vec<FeatureId> = self
+            .sessions
+            .get(&conn)
+            .and_then(|s| s.peer.as_ref())
+            .map(|p| p.features.iter().map(|f| f.id).collect())
+            .unwrap_or_default();
+        for f in features {
+            self.dispatch_simple(now, f, |feat, cx| feat.on_peer_update(cx, peer));
         }
     }
 
@@ -981,6 +1118,8 @@ impl Core {
                     id: s.info.peer,
                     version: s.negotiated(feature)?,
                     allows_us: permission.is_none_or(|p| s.remote_grants.contains(&p)),
+                    state: s.remote_state,
+                    platform: s.peer.as_ref().map_or(Platform::UNKNOWN, |p| p.platform),
                 })
             })
             .collect();

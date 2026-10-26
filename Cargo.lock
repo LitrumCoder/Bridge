@@ -273,6 +273,8 @@ version = "0.1.0"
 dependencies = [
  "bridge-core",
  "bridge-platform",
+ "bridge-protocol",
+ "tracing",
 ]
 
 [[package]]
@@ -308,7 +310,10 @@ dependencies = [
 name = "bridge-platform"
 version = "0.1.0"
 dependencies = [
+ "bridge-core",
  "bridge-protocol",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -329,11 +334,15 @@ dependencies = [
  "bridge-core",
  "bridge-daemon",
  "bridge-discovery",
+ "bridge-feature-input",
+ "bridge-platform",
  "bridge-protocol",
  "bridge-transport",
  "bytes",
+ "criterion",
  "serde",
  "tokio",
+ "tracing-subscriber",
 ]
 
 [[package]]

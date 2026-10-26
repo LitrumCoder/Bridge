@@ -14,7 +14,7 @@ use bridge_protocol::{DeviceId, PermissionId};
 use bridge_transport::ExpectedPeer;
 use tokio::sync::Notify;
 
-pub use node::{NodeBuilder, NodeError, NodeEvent, NodeHandle, bind_transport};
+pub use node::{LocalSender, NodeBuilder, NodeError, NodeEvent, NodeHandle, bind_transport};
 pub use pairing_uri::{PairingInvite, QrPayload, parse_pairing_uri};
 pub use trust::{ALL_PERMISSIONS, TrustStore, TrustedPeer, unix_now};
 

@@ -3,7 +3,7 @@
 
 use std::ops::RangeInclusive;
 
-use bridge_protocol::control::DeviceState;
+use bridge_protocol::control::{DeviceState, LayoutUpdate};
 use bridge_protocol::{
     ChannelClass, DeviceId, EncodeError, FeatureDescriptor, FeatureId, PermissionId, Validate,
 };
@@ -67,6 +67,9 @@ pub struct PeerView {
     pub version: u16,
     /// Whether the peer granted us this feature's permission.
     pub allows_us: bool,
+    /// What the peer last announced (`Paused` peers keep the connection but not the cursor).
+    pub state: DeviceState,
+    pub platform: bridge_protocol::Platform,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -110,6 +113,11 @@ impl FeatureCx<'_> {
     ) -> Result<(), EncodeError> {
         self.push(peer, kind, bridge_protocol::encode_payload(msg)?, false);
         Ok(())
+    }
+
+    /// Queues an already encoded payload (e.g. from a `define_messages!` enum).
+    pub fn send_encoded(&mut self, peer: PeerId, kind: u16, payload: Vec<u8>) {
+        self.push(peer, kind, payload, false);
     }
 
     /// Queues an unreliable datagram (`InputMotion`-style channels).
@@ -157,7 +165,17 @@ pub trait Feature: Send + 'static {
 
     fn on_device_state(&mut self, _cx: &mut FeatureCx<'_>, _state: DeviceState) {}
 
+    /// The peer's permissions for us or its announced state changed; re-read
+    /// `cx.peer(&peer)`.
+    fn on_peer_update(&mut self, _cx: &mut FeatureCx<'_>, _peer: PeerId) {}
+
     fn on_tick(&mut self, _cx: &mut FeatureCx<'_>) {}
+
+    /// The shared screen layout changed.
+    fn on_layout(&mut self, _cx: &mut FeatureCx<'_>, _layout: &LayoutUpdate) {}
+
+    /// An event posted from outside the network loop (an OS hook, a UI request).
+    fn on_local(&mut self, _cx: &mut FeatureCx<'_>, _event: Box<dyn std::any::Any + Send>) {}
 }
 
 /// Decodes a message of type `T` for use inside `Feature::on_message`.

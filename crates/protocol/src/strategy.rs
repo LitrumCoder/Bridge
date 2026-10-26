@@ -218,10 +218,72 @@ pub fn control_message() -> impl Strategy<Value = ControlMessage> {
     ]
 }
 
+fn layout_tag() -> impl Strategy<Value = crate::input::LayoutTag> {
+    (bounded_string::<16>(), bounded_string::<64>())
+        .prop_map(|(lang, id)| crate::input::LayoutTag { lang, id })
+}
+
+pub fn input_message() -> impl Strategy<Value = crate::input::InputMessage> {
+    use crate::input::*;
+    let coord = -MAX_COORD..=MAX_COORD;
+    let button = prop_oneof![
+        Just(MouseButton::Left),
+        Just(MouseButton::Right),
+        Just(MouseButton::Middle),
+        Just(MouseButton::Back),
+        Just(MouseButton::Forward),
+    ];
+    let layout = layout_tag();
+    prop_oneof![
+        (
+            any::<u32>(),
+            coord.clone(),
+            coord,
+            any::<(bool, bool, bool)>(),
+            proptest::option::of(layout_tag())
+        )
+            .prop_map(|(screen, x, y, (caps, num, scroll), layout)| {
+                Enter {
+                    screen,
+                    x,
+                    y,
+                    locks: LockState { caps, num, scroll },
+                    layout,
+                }
+                .into()
+            }),
+        Just(Leave.into()),
+        (0u16..=HidUsage::MAX, any::<bool>(), any::<bool>()).prop_map(|(u, down, rep)| Key {
+            usage: HidUsage(u),
+            down,
+            repeat: rep && down
+        }
+        .into()),
+        (button, any::<bool>()).prop_map(|(button, down)| Button { button, down }.into()),
+        (-MAX_WHEEL..=MAX_WHEEL, -MAX_WHEEL..=MAX_WHEEL)
+            .prop_map(|(dx, dy)| Wheel { dx, dy }.into()),
+        Just(ReleaseAll.into()),
+        layout.prop_map(|layout| SetLayout { layout }.into()),
+        "[a-zA-Zа-яА-Я0-9 ]{0,40}".prop_map(|s: String| Text {
+            text: BoundedString::truncating(&s)
+        }
+        .into()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Envelope, FrameDecoder, encode_frame};
+
+    proptest! {
+        #[test]
+        fn input_message_roundtrips(msg in input_message()) {
+            let env = msg.to_envelope().unwrap();
+            let back = crate::input::InputMessage::from_envelope(&Envelope::parse(&env.to_bytes()).unwrap()).unwrap();
+            prop_assert_eq!(back, msg);
+        }
+    }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]

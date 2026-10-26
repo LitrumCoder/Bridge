@@ -876,3 +876,87 @@ fn registry_rejects_reserved_duplicate_and_empty_features() {
     assert_eq!(r.len(), 1);
     assert!(!r.is_empty());
 }
+
+#[test]
+fn layouts_converge_with_both_devices_screens() {
+    let mut a = node(1, PROTOCOL_VERSION, None);
+    let mut b = node(2, PROTOCOL_VERSION, None);
+    let screen = |id| LocalScreen {
+        id,
+        px_w: 1920,
+        px_h: 1080,
+        origin_x: 0,
+        origin_y: 0,
+        scale_permille: 1000,
+        size_mm: None,
+    };
+    a.core.set_local_screens(Micros(1), vec![screen(0)]);
+    b.core.set_local_screens(Micros(1), vec![screen(0)]);
+    let (link, _) = connect(&mut a, &mut b, 1, true, Micros(2));
+    pump(&mut a, &mut b, &link, Micros(3));
+    let la = a.core.layout().unwrap().clone();
+    let lb = b.core.layout().unwrap().clone();
+    assert_eq!(la, lb, "same layout on both sides");
+    assert_eq!(la.screens.len(), 2);
+    let xa = la
+        .screens
+        .iter()
+        .find(|s| s.device == a.id)
+        .unwrap()
+        .rect_mm
+        .x;
+    let xb = la
+        .screens
+        .iter()
+        .find(|s| s.device == b.id)
+        .unwrap()
+        .rect_mm
+        .x;
+    assert!(xa != xb, "devices do not overlap");
+
+    // A resolution change on B propagates as a newer version.
+    let mut big = screen(0);
+    big.px_w = 3840;
+    big.px_h = 2160;
+    b.core.set_local_screens(Micros(4), vec![big]);
+    pump(&mut a, &mut b, &link, Micros(4));
+    let la2 = a.core.layout().unwrap();
+    assert!(la2.version > la.version);
+    assert_eq!(
+        la2.screens
+            .iter()
+            .find(|s| s.device == b.id)
+            .unwrap()
+            .px_width,
+        3840
+    );
+
+    // The editor moves A's screen; both see it.
+    let mut placed = la2.screens.to_vec();
+    placed
+        .iter_mut()
+        .find(|s| s.device == a.id)
+        .unwrap()
+        .rect_mm
+        .y = 50.0;
+    a.core.set_layout(Micros(5), placed).unwrap();
+    pump(&mut a, &mut b, &link, Micros(5));
+    assert_eq!(
+        b.core
+            .layout()
+            .unwrap()
+            .screens
+            .iter()
+            .find(|s| s.device == a.id)
+            .unwrap()
+            .rect_mm
+            .y,
+        50.0
+    );
+    let mut bad = b.core.layout().unwrap().screens.to_vec();
+    bad[0].rect_mm.w = f64::NAN;
+    assert!(
+        a.core.set_layout(Micros(6), bad).is_err(),
+        "editor input is validated"
+    );
+}

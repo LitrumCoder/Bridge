@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use bridge_protocol::control::DeviceState;
+use bridge_protocol::control::{DeviceState, LayoutUpdate};
 use bridge_protocol::{DeviceId, Platform};
 use serde::{Deserialize, Serialize};
 
@@ -11,6 +11,8 @@ pub struct NodeStatus {
     pub listen: SocketAddr,
     pub state: DeviceState,
     pub peers: Vec<PeerStatus>,
+    /// Shared screen layout, for the layout editor.
+    pub layout: Option<LayoutUpdate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

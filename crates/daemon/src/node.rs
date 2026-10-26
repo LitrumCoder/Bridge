@@ -68,6 +68,23 @@ impl Entropy for OsEntropy {
     }
 }
 
+/// Lets code outside the network loop (an OS hook thread, the UI) hand events to one
+/// feature; they arrive in `Feature::on_local`.
+#[derive(Clone)]
+pub struct LocalSender {
+    feature: bridge_protocol::FeatureId,
+    input: mpsc::UnboundedSender<Input>,
+}
+
+impl LocalSender {
+    pub fn post(&self, event: impl std::any::Any + Send) {
+        let _ = self.input.send(Input::Local {
+            feature: self.feature,
+            event: Box::new(event),
+        });
+    }
+}
+
 pub struct NodeBuilder {
     name: String,
     registry: FeatureRegistry,
@@ -76,10 +93,14 @@ pub struct NodeBuilder {
     discovery: Option<Arc<dyn Discovery>>,
     hide_name: bool,
     entropy: Option<Box<dyn Entropy>>,
+    screens: Vec<bridge_core::LocalScreen>,
+    input_tx: mpsc::UnboundedSender<Input>,
+    input_rx: mpsc::UnboundedReceiver<Input>,
 }
 
 impl NodeBuilder {
     pub fn new(name: impl Into<String>, trust: Arc<TrustStore>) -> Self {
+        let (input_tx, input_rx) = mpsc::unbounded_channel();
         Self {
             name: name.into(),
             registry: FeatureRegistry::new(),
@@ -88,7 +109,24 @@ impl NodeBuilder {
             discovery: None,
             hide_name: false,
             entropy: None,
+            screens: Vec::new(),
+            input_tx,
+            input_rx,
         }
+    }
+
+    /// A channel into `feature` that can be created before the node starts.
+    pub fn local_sender(&self, feature: bridge_protocol::FeatureId) -> LocalSender {
+        LocalSender {
+            feature,
+            input: self.input_tx.clone(),
+        }
+    }
+
+    /// This device's monitors, written into the shared layout at start.
+    pub fn screens(mut self, screens: Vec<bridge_core::LocalScreen>) -> Self {
+        self.screens = screens;
+        self
     }
 
     pub fn feature(mut self, feature: impl Feature) -> Result<Self, RegistryError> {
@@ -126,7 +164,7 @@ impl NodeBuilder {
         let entropy = self
             .entropy
             .unwrap_or_else(|| Box::new(OsEntropy(ring::rand::SystemRandom::new())));
-        let core = Core::new(
+        let mut core = Core::new(
             CoreConfig {
                 device_id,
                 name: self.name.clone(),
@@ -138,8 +176,11 @@ impl NodeBuilder {
             self.registry,
             entropy,
         );
+        if !self.screens.is_empty() {
+            core.set_local_screens(Micros::ZERO, self.screens.clone());
+        }
         let transport = Arc::new(transport);
-        let (input_tx, input_rx) = mpsc::unbounded_channel();
+        let (input_tx, input_rx) = (self.input_tx, self.input_rx);
         let (events, _) = broadcast::channel(256);
         let (connected_tx, connected_rx) = watch::channel(HashSet::new());
         let status = Arc::new(Mutex::new(NodeStatus {
@@ -148,6 +189,7 @@ impl NodeBuilder {
             listen,
             state: DeviceState::Connected,
             peers: Vec::new(),
+            layout: core.layout().cloned(),
         }));
         let handle = NodeHandle {
             inner: Arc::new(Inner {
@@ -334,6 +376,21 @@ impl NodeHandle {
 
     pub fn close_pairing(&self) {
         let _ = self.inner.input.send(Input::ClosePairing);
+    }
+
+    /// The local monitors changed (resolution, hot-plug).
+    pub fn set_screens(&self, screens: Vec<bridge_core::LocalScreen>) {
+        let _ = self.inner.input.send(Input::SetScreens(screens));
+    }
+
+    /// The current shared screen layout.
+    pub fn layout(&self) -> Option<bridge_protocol::control::LayoutUpdate> {
+        self.inner
+            .status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .layout
+            .clone()
     }
 
     /// The address peers should dial: a LAN address of this machine with our port.
@@ -783,6 +840,11 @@ enum Input {
     SetGrants(DeviceId, Vec<PermissionId>),
     OpenPairing(oneshot::Sender<PairingReply>),
     ClosePairing,
+    Local {
+        feature: bridge_protocol::FeatureId,
+        event: Box<dyn std::any::Any + Send>,
+    },
+    SetScreens(Vec<bridge_core::LocalScreen>),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -914,6 +976,8 @@ impl Driver {
                 let _ = reply.send(result);
             }
             Input::ClosePairing => self.core.close_pairing(),
+            Input::Local { feature, event } => self.core.handle_local(now, feature, event),
+            Input::SetScreens(screens) => self.core.set_local_screens(now, screens),
             Input::Shutdown(_) => {}
         }
     }
@@ -1001,6 +1065,9 @@ impl Driver {
             CoreEvent::Unpaired { peer } => {
                 info!(%peer, "the peer revoked our pairing");
                 self.trust.remove(peer);
+            }
+            CoreEvent::LayoutChanged(l) => {
+                self.status.lock().unwrap_or_else(|p| p.into_inner()).layout = Some(l.clone());
             }
             CoreEvent::Rejected { code, message, .. } => {
                 warn!(?code, "connection rejected: {message}")

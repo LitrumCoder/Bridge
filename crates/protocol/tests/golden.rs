@@ -195,3 +195,105 @@ fn golden_samples_decode_back() {
         );
     }
 }
+
+fn input_samples() -> Vec<(&'static str, bridge_protocol::input::InputMessage)> {
+    use bridge_protocol::input::*;
+    vec![
+        (
+            "enter",
+            Enter {
+                screen: 1,
+                x: 0,
+                y: 540,
+                locks: LockState {
+                    caps: true,
+                    num: true,
+                    scroll: false,
+                },
+                layout: Some(LayoutTag {
+                    lang: BoundedString::truncating("ru-RU"),
+                    id: BoundedString::truncating("00000419"),
+                }),
+            }
+            .into(),
+        ),
+        ("leave", Leave.into()),
+        (
+            "key",
+            Key {
+                usage: HidUsage::LEFT_SHIFT,
+                down: true,
+                repeat: false,
+            }
+            .into(),
+        ),
+        (
+            "button",
+            Button {
+                button: MouseButton::Left,
+                down: false,
+            }
+            .into(),
+        ),
+        ("wheel", Wheel { dx: 0, dy: -120 }.into()),
+        ("release_all", ReleaseAll.into()),
+        (
+            "set_layout",
+            SetLayout {
+                layout: LayoutTag {
+                    lang: BoundedString::truncating("en-US"),
+                    id: BoundedString::truncating("00000409"),
+                },
+            }
+            .into(),
+        ),
+        (
+            "text",
+            Text {
+                text: BoundedString::truncating("ok"),
+            }
+            .into(),
+        ),
+    ]
+}
+
+#[test]
+fn input_messages_match_golden_bytes() {
+    use bridge_protocol::input::{InputMessage, Motion};
+    let path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "tests", "golden", "input.hex"]
+        .iter()
+        .collect();
+    let mut rendered: String = input_samples()
+        .iter()
+        .map(|(name, msg)| {
+            format!(
+                "{name} {}\n",
+                hex(&msg.to_envelope().expect("encode").to_bytes())
+            )
+        })
+        .collect();
+    let motion = Motion::Absolute {
+        seq: 300,
+        screen: 0,
+        x: 1919,
+        y: -1,
+    };
+    let datagram = encode_datagram(FeatureId::INPUT, &encode_payload(&motion).expect("encode"));
+    rendered.push_str(&format!("motion_datagram {}\n", hex(&datagram)));
+
+    let mut kinds: Vec<u16> = input_samples().iter().map(|(_, m)| m.kind()).collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, InputMessage::KINDS.to_vec());
+
+    if std::env::var_os("BRIDGE_BLESS").is_some() {
+        std::fs::write(&path, &rendered).expect("write golden file");
+        return;
+    }
+    let expected = std::fs::read_to_string(&path)
+        .expect("golden file missing; run with BRIDGE_BLESS=1 once")
+        .replace("\r\n", "\n");
+    assert_eq!(
+        rendered, expected,
+        "wire format changed; see ADR-0003 before blessing"
+    );
+}

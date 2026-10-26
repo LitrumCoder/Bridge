@@ -6,8 +6,17 @@ edition.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+mock = []
+
 [dependencies]
+bridge-core.workspace = true
 bridge-protocol.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }

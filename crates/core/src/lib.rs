@@ -5,11 +5,14 @@
 
 pub mod clock;
 mod feature;
+pub mod input;
+mod layout;
 mod node;
 pub mod pairing;
 mod scheduler;
 mod time;
 
+pub use layout::LocalScreen;
 pub use pairing::{Entropy, PAIRING_WINDOW, PairingError, PairingSecret};
 
 pub use feature::{
