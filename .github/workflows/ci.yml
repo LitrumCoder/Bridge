@@ -41,6 +41,27 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo xtask check-deps
 
+  platform-x11:
+    name: X11 capture and injection (Xvfb)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get update && sudo apt-get install -y xvfb
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: xvfb-run -a env BRIDGE_X11_TESTS=1 cargo test --locked -p bridge-platform --features mock --test x11_native -- --nocapture
+
+  platform-windows:
+    name: Windows hooks and SendInput
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: cargo test --locked -p bridge-platform --features mock --test windows_native -- --test-threads=1 --nocapture
+        env:
+          BRIDGE_PLATFORM_TESTS: "1"
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

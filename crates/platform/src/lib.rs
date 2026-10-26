@@ -9,13 +9,37 @@ use bridge_protocol::input::{HidUsage, LayoutTag, LockState, MouseButton};
 pub use bridge_core::LocalScreen;
 pub use bridge_core::input::{CaptureEvent, Decision};
 
+pub mod keymap;
+#[cfg(target_os = "linux")]
+pub mod linux_x11;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
+#[cfg(windows)]
+pub mod windows;
 
-// TODO(M4b): windows (LL hooks + SendInput), linux_x11 (XI2 + XTest).
+/// The input platform of this OS, or why there is none.
+pub fn native() -> Result<Platform, PlatformError> {
+    #[cfg(windows)]
+    {
+        windows::platform()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // TODO(M4c): prefer the Wayland portals when WAYLAND_DISPLAY is set.
+        linux_x11::platform()
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        // TODO(M4c): macOS.
+        Err(PlatformError::Unsupported(
+            "input sharing on this OS arrives in milestone 4c".into(),
+        ))
+    }
+}
+
 // TODO(M4c): macos (CGEventTap + CGEventPost), linux_wayland (portals + libei).
 // TODO(M5): Clipboard. TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
-// TODO(M8): NetworkMonitor. TODO(M4b): Overlay (edge glow, locator).
+// TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PlatformError {
