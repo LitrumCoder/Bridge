@@ -1,0 +1,18 @@
+# Fuzz harness only: never shipped, so NCSA (libfuzzer-sys, LLVM) is allowed here (ADR-0013).
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "NCSA",
+]
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = true

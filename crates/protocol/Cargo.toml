@@ -6,7 +6,22 @@ edition.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+proptest = ["dep:proptest"]
+
 [dependencies]
+postcard = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+proptest = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "codec"
+harness = false
 
 [lints]
 workspace = true

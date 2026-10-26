@@ -2,3 +2,10 @@
 # `max_ns * ci_factor`; `--strict` uses the exact limits on the reference machine.
 # Targets are added together with their benchmarks (milestones 1, 4a, 6a, 7).
 ci_factor = 2.0
+
+# Full control-stream path: encode message, envelope, frame, then decode all three.
+# Reference: 195 ns median on the development machine (2026-10-26).
+[[bench]]
+id = "codec/clock_pong_roundtrip"
+statistic = "median"
+max_ns = 400
