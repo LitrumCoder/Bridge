@@ -1,0 +1,13 @@
+[package]
+name = "bridge-ffi"
+description = "UniFFI bindings of the node for Android."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-daemon.workspace = true
+
+[lints]
+workspace = true

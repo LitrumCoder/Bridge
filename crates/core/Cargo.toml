@@ -1,0 +1,13 @@
+[package]
+name = "bridge-core"
+description = "Sans-IO core: peers, sessions, routing, cursor state, layout geometry, channel scheduling."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-protocol.workspace = true
+
+[lints]
+workspace = true

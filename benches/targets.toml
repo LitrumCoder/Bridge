@@ -1,0 +1,4 @@
+# Benchmark targets (ADR-0014). `cargo xtask bench-check` compares criterion estimates with
+# `max_ns * ci_factor`; `--strict` uses the exact limits on the reference machine.
+# Targets are added together with their benchmarks (milestones 1, 4a, 6a, 7).
+ci_factor = 2.0

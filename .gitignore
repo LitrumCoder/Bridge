@@ -1,0 +1,16 @@
+/target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/coverage
+node_modules/
+dist/
+/apps/desktop/src-tauri/target
+/apps/android/.gradle
+/apps/android/build
+/apps/android/app/build
+/apps/android/local.properties
+*.profraw
+lcov.info
+.DS_Store
+.idea/
+.vscode/

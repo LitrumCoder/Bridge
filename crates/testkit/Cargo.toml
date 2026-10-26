@@ -1,0 +1,15 @@
+[package]
+name = "bridge-testkit"
+description = "Test harness: virtual UDP network, in-process multi-node setups."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-daemon.workspace = true
+bridge-transport.workspace = true
+bridge-platform.workspace = true
+
+[lints]
+workspace = true

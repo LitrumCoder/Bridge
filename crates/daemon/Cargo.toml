@@ -1,0 +1,22 @@
+[package]
+name = "bridge-daemon"
+description = "Node assembly (`bridge_node`) and the `bridged` daemon."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-protocol.workspace = true
+bridge-core.workspace = true
+bridge-transport.workspace = true
+bridge-discovery.workspace = true
+bridge-platform.workspace = true
+bridge-feature-input.workspace = true
+bridge-feature-clipboard.workspace = true
+bridge-feature-files.workspace = true
+bridge-feature-midi.workspace = true
+bridge-ipc.workspace = true
+
+[lints]
+workspace = true

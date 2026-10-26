@@ -1,0 +1,12 @@
+[package]
+name = "bridge-protocol"
+description = "Wire types, envelope, codec and protocol versioning. No OS dependencies."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

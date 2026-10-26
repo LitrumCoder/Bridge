@@ -1,0 +1,13 @@
+[package]
+name = "bridge-discovery"
+description = "Device discovery: mDNS/DNS-SD and manual addresses."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+bridge-protocol.workspace = true
+
+[lints]
+workspace = true
