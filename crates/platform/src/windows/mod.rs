@@ -1,12 +1,14 @@
 //! Windows: low-level hooks for capture, `SendInput` for injection (ADR-0005).
 
 mod capture;
+mod clipboard;
 mod inject;
 mod screens;
 
 use std::sync::Arc;
 
 pub use capture::WinCapture;
+pub use clipboard::WinClipboard;
 pub use inject::WinInjector;
 pub use screens::WinScreens;
 

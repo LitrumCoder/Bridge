@@ -93,6 +93,65 @@ impl<'de, T: Deserialize<'de>, const N: usize> Deserialize<'de> for BoundedVec<T
     }
 }
 
+/// Opaque bytes of at most `N`, encoded as one length-prefixed blob. `Debug` shows only
+/// the length: payloads like clipboard contents must never reach the logs.
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct BoundedBytes<const N: usize>(Vec<u8>);
+
+impl<const N: usize> BoundedBytes<N> {
+    pub const MAX: usize = N;
+
+    pub fn new(v: Vec<u8>) -> Option<Self> {
+        (v.len() <= N).then_some(Self(v))
+    }
+
+    pub fn into_vec(self) -> Vec<u8> {
+        self.0
+    }
+}
+
+impl<const N: usize> Deref for BoundedBytes<N> {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl<const N: usize> fmt::Debug for BoundedBytes<N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
+
+impl<const N: usize> Serialize for BoundedBytes<N> {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_bytes(&self.0)
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for BoundedBytes<N> {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V<const N: usize>;
+
+        impl<const N: usize> Visitor<'_> for V<N> {
+            type Value = BoundedBytes<N>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "at most {N} bytes")
+            }
+
+            fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+                if v.len() > N {
+                    return Err(E::invalid_length(v.len(), &self));
+                }
+                Ok(BoundedBytes(v.to_vec()))
+            }
+        }
+
+        d.deserialize_bytes(V::<N>)
+    }
+}
+
 /// UTF-8 string of at most `N` bytes.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct BoundedString<const N: usize>(String);
@@ -204,6 +263,18 @@ mod tests {
         assert!(postcard::from_bytes::<BoundedString<4>>(&bytes).is_err());
         let s: BoundedString<6> = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(s.as_str(), "абв");
+    }
+
+    #[test]
+    fn bytes_are_one_blob_and_hidden_in_debug() {
+        let b = BoundedBytes::<4>::new(b"abc".to_vec()).unwrap();
+        let enc = postcard::to_allocvec(&b).unwrap();
+        assert_eq!(enc, vec![3, b'a', b'b', b'c']);
+        assert_eq!(postcard::from_bytes::<BoundedBytes<4>>(&enc).unwrap(), b);
+        assert!(postcard::from_bytes::<BoundedBytes<2>>(&enc).is_err());
+        assert!(BoundedBytes::<2>::new(vec![0; 3]).is_none());
+        assert_eq!(format!("{b:?}"), "<3 bytes>");
+        assert_eq!(b.into_vec(), b"abc");
     }
 
     #[test]

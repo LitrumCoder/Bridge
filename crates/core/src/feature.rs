@@ -13,6 +13,10 @@ use crate::Micros;
 
 pub type PeerId = DeviceId;
 
+/// Posts an event to a feature's `on_local` from any thread (the daemon wires it to the
+/// node's local channel).
+pub type LocalPost = std::sync::Arc<dyn Fn(Box<dyn std::any::Any + Send>) + Send + Sync>;
+
 #[derive(Clone, Debug)]
 pub struct FeatureInfo {
     pub id: FeatureId,

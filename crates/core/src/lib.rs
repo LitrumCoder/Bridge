@@ -16,8 +16,8 @@ pub use layout::LocalScreen;
 pub use pairing::{Entropy, PAIRING_WINDOW, PairingError, PairingSecret};
 
 pub use feature::{
-    Feature, FeatureCx, FeatureError, FeatureInfo, FeatureRegistry, PeerDownReason, PeerId,
-    PeerView, RegistryError, decode,
+    Feature, FeatureCx, FeatureError, FeatureInfo, FeatureRegistry, LocalPost, PeerDownReason,
+    PeerId, PeerView, RegistryError, decode,
 };
 pub use node::{
     Action, ConnId, ConnectInfo, Core, CoreConfig, CoreEvent, CoreStats, HANDSHAKE_TIMEOUT,
@@ -26,5 +26,4 @@ pub use node::{
 pub use scheduler::{ChannelPlan, ChannelScheduler, ConnectionKind};
 pub use time::Micros;
 
-// TODO(M4a): layout geometry, InputRouter, KeyTracker.
 // TODO(M8): device state machine and network profiles.

@@ -83,6 +83,16 @@ impl LocalSender {
             event: Box::new(event),
         });
     }
+
+    /// The same, as the plain closure features take.
+    pub fn into_post(self) -> bridge_core::LocalPost {
+        Arc::new(move |event| {
+            let _ = self.input.send(Input::Local {
+                feature: self.feature,
+                event,
+            });
+        })
+    }
 }
 
 pub struct NodeBuilder {

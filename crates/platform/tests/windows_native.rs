@@ -8,9 +8,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bridge_platform::windows::{WinCapture, WinInjector, WinScreens};
+use bridge_platform::windows::{WinCapture, WinClipboard, WinInjector, WinScreens};
 use bridge_platform::{
-    CaptureEvent, CaptureSink, Decision, InputCapture, InputInjector, ScreenInfo,
+    CaptureEvent, CaptureSink, ClipChange, ClipFormat, Clipboard, ClipboardProvider, ClipboardSink,
+    Decision, InputCapture, InputInjector, ScreenInfo,
 };
 use bridge_protocol::input::HidUsage;
 use windows_sys::Win32::Foundation::POINT;
@@ -104,6 +105,105 @@ fn hook_sees_foreign_keys_but_not_our_own_injection() {
         "our own injection must not loop back: {own:?}"
     );
     capture.stop();
+}
+
+#[derive(Default)]
+struct Changes(Mutex<Vec<ClipChange>>);
+
+impl ClipboardSink for Changes {
+    fn changed(&self, change: ClipChange) {
+        self.0.lock().unwrap().push(change);
+    }
+}
+
+struct Fixed(Vec<(ClipFormat, Vec<u8>)>, Mutex<Vec<ClipFormat>>);
+
+impl ClipboardProvider for Fixed {
+    fn render(&self, format: ClipFormat) -> Option<Vec<u8>> {
+        self.1.lock().unwrap().push(format);
+        self.0
+            .iter()
+            .find(|(f, _)| *f == format)
+            .map(|(_, d)| d.clone())
+    }
+}
+
+fn wait_change(c: &Changes, pred: impl Fn(&ClipChange) -> bool) -> Option<ClipChange> {
+    for _ in 0..100 {
+        if let Some(ch) = c.0.lock().unwrap().iter().find(|ch| pred(ch)) {
+            return Some(ch.clone());
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+/// Replaces the user's clipboard contents: opt-in like the rest of this file.
+#[test]
+fn clipboard_renders_lazily_and_reports_foreign_copies() {
+    if !enabled() {
+        eprintln!("skipped: set BRIDGE_PLATFORM_TESTS=1");
+        return;
+    }
+    use windows_sys::Win32::System::DataExchange::{
+        CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+    };
+    use windows_sys::Win32::System::Memory::{
+        GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
+    };
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
+
+    let changes = Arc::new(Changes::default());
+    let clip = WinClipboard::new().unwrap();
+    clip.start(changes.clone()).unwrap();
+
+    let png = bridge_platform::clipfmt::rgba_to_png(2, 2, &[9; 16]).unwrap();
+    let provider = Arc::new(Fixed(
+        vec![
+            (ClipFormat::TEXT, "строка\nдва".as_bytes().to_vec()),
+            (ClipFormat::PNG, png.clone()),
+        ],
+        Mutex::new(Vec::new()),
+    ));
+    clip.announce(&[ClipFormat::TEXT, ClipFormat::PNG], provider.clone())
+        .unwrap();
+    let own = wait_change(&changes, |c| c.own).expect("our takeover is reported");
+    assert!(own.formats.contains(&ClipFormat::TEXT));
+    std::thread::sleep(Duration::from_millis(300));
+    // Clipboard monitors on the desktop may read the text at once; the image must wait.
+    assert!(
+        !provider.1.lock().unwrap().contains(&ClipFormat::PNG),
+        "the image is not rendered before a paste"
+    );
+
+    let text = clip.read(ClipFormat::TEXT).unwrap().unwrap();
+    assert_eq!(String::from_utf8(text).unwrap(), "строка\nдва");
+    assert_eq!(clip.read(ClipFormat::PNG).unwrap(), Some(png));
+    assert!(
+        provider.1.lock().unwrap().contains(&ClipFormat::PNG),
+        "rendered on demand"
+    );
+
+    changes.0.lock().unwrap().clear();
+    let units: Vec<u16> = "foreign".encode_utf16().chain([0]).collect();
+    unsafe {
+        assert!(OpenClipboard(std::ptr::null_mut()) != 0);
+        EmptyClipboard();
+        let h = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2);
+        let p = GlobalLock(h) as *mut u16;
+        std::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
+        GlobalUnlock(h);
+        SetClipboardData(u32::from(CF_UNICODETEXT), h);
+        CloseClipboard();
+    }
+    let foreign = wait_change(&changes, |c| !c.own).expect("a foreign copy is reported");
+    assert_eq!(foreign.formats, vec![ClipFormat::TEXT]);
+    assert!(!foreign.concealed);
+    assert_eq!(
+        clip.read(ClipFormat::TEXT).unwrap(),
+        Some(b"foreign".to_vec())
+    );
+    clip.stop();
 }
 
 #[test]

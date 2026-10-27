@@ -2,6 +2,7 @@
 //! RandR for monitors (ADR-0005). Pure Rust over the X protocol (x11rb), no libX11.
 
 mod capture;
+mod clipboard;
 mod inject;
 
 use std::sync::Arc;
@@ -13,6 +14,7 @@ use x11rb::protocol::xproto::{ConnectionExt as _, KeyButMask};
 use x11rb::rust_connection::RustConnection;
 
 pub use capture::X11Capture;
+pub use clipboard::X11Clipboard;
 pub use inject::X11Injector;
 
 use crate::{LocalScreen, Platform, PlatformError, ScreenInfo};

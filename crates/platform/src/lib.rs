@@ -4,7 +4,10 @@
 
 use std::sync::Arc;
 
+pub use bridge_protocol::clipboard::ClipFormat;
 use bridge_protocol::input::{HidUsage, LayoutTag, LockState, MouseButton};
+
+pub mod clipfmt;
 
 pub use bridge_core::LocalScreen;
 pub use bridge_core::input::{CaptureEvent, Decision};
@@ -47,7 +50,33 @@ pub fn native() -> Result<Platform, PlatformError> {
     }
 }
 
-// TODO(M5): Clipboard. TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
+/// The clipboard of this OS, or why it cannot be shared.
+pub fn native_clipboard() -> Result<Arc<dyn Clipboard>, PlatformError> {
+    #[cfg(windows)]
+    {
+        Ok(Arc::new(windows::WinClipboard::new()?))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if linux_wayland::is_wayland_session() && std::env::var_os("DISPLAY").is_none() {
+            // TODO(M5+): ext-data-control-v1 / zwlr-data-control-v1.
+            return Err(PlatformError::Unsupported(
+                "clipboard sharing on Wayland without XWayland is not implemented yet".into(),
+            ));
+        }
+        Ok(Arc::new(linux_x11::X11Clipboard::new()?))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        // TODO(macOS-final): NSPasteboard polling + data provider (owner deferred all
+        // macOS work to the end of stage 1, ROADMAP).
+        Err(PlatformError::Unsupported(
+            "clipboard sharing is not available on this OS yet".into(),
+        ))
+    }
+}
+
+// TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
 // TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -94,6 +123,42 @@ pub trait ScreenInfo: Send + Sync + 'static {
     /// Active keyboard layout, for language sync.
     fn layout_tag(&self) -> Option<LayoutTag>;
     fn locks(&self) -> LockState;
+}
+
+/// What the local clipboard holds now. `own` marks changes we made ourselves (after
+/// `announce`), which must not be offered back; `concealed` marks contents a password
+/// manager asked to keep out of clipboard monitors.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct ClipChange {
+    pub formats: Vec<ClipFormat>,
+    pub own: bool,
+    pub concealed: bool,
+}
+
+pub trait ClipboardSink: Send + Sync + 'static {
+    /// Called on the clipboard thread; must not block.
+    fn changed(&self, change: ClipChange);
+}
+
+/// Renders an announced format when an application pastes. May block (it waits for
+/// the network); return `None` when the data cannot be had.
+pub trait ClipboardProvider: Send + Sync + 'static {
+    fn render(&self, format: ClipFormat) -> Option<Vec<u8>>;
+}
+
+/// The OS clipboard in wire formats (`ClipFormat`): text is UTF-8 with `\n`, HTML is
+/// UTF-8 markup, images are PNG.
+pub trait Clipboard: Send + Sync + 'static {
+    fn start(&self, sink: Arc<dyn ClipboardSink>) -> Result<(), PlatformError>;
+    /// Reads one format of the current contents (`None`: not present).
+    fn read(&self, format: ClipFormat) -> Result<Option<Vec<u8>>, PlatformError>;
+    /// Takes the clipboard and promises `formats`; `provider` renders them on paste.
+    fn announce(
+        &self,
+        formats: &[ClipFormat],
+        provider: Arc<dyn ClipboardProvider>,
+    ) -> Result<(), PlatformError>;
+    fn stop(&self);
 }
 
 /// The services of one OS, as the daemon wires them.

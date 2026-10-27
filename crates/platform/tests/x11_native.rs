@@ -117,3 +117,73 @@ fn xtest_injection_is_seen_by_xinput2_capture() {
     );
     capture.stop();
 }
+
+#[derive(Default)]
+struct Changes(Mutex<Vec<bridge_platform::ClipChange>>);
+
+impl bridge_platform::ClipboardSink for Changes {
+    fn changed(&self, change: bridge_platform::ClipChange) {
+        self.0.lock().unwrap().push(change);
+    }
+}
+
+struct Fixed(Vec<(bridge_platform::ClipFormat, Vec<u8>)>);
+
+impl bridge_platform::ClipboardProvider for Fixed {
+    fn render(&self, format: bridge_platform::ClipFormat) -> Option<Vec<u8>> {
+        self.0
+            .iter()
+            .find(|(f, _)| *f == format)
+            .map(|(_, d)| d.clone())
+    }
+}
+
+/// Two clipboard clients on one display: one owns, the other sees the change and reads,
+/// including a 3 MB image that must go through INCR.
+#[test]
+fn clipboard_ownership_targets_and_incr() {
+    use bridge_platform::linux_x11::X11Clipboard;
+    use bridge_platform::{ClipFormat, Clipboard};
+    if !enabled() {
+        eprintln!("skipped: set BRIDGE_X11_TESTS=1 and DISPLAY");
+        return;
+    }
+    let (owner, watcher) = (X11Clipboard::new().unwrap(), X11Clipboard::new().unwrap());
+    let (oc, wc) = (Arc::new(Changes::default()), Arc::new(Changes::default()));
+    owner.start(oc.clone()).unwrap();
+    watcher.start(wc.clone()).unwrap();
+    let image: Vec<u8> = (0..3_000_000u32).map(|i| (i % 253) as u8).collect();
+    owner
+        .announce(
+            &[ClipFormat::TEXT, ClipFormat::PNG],
+            Arc::new(Fixed(vec![
+                (ClipFormat::TEXT, "привет".as_bytes().to_vec()),
+                (ClipFormat::PNG, image.clone()),
+            ])),
+        )
+        .unwrap();
+    let start = Instant::now();
+    let seen = loop {
+        if let Some(c) = wc.0.lock().unwrap().iter().find(|c| !c.own).cloned() {
+            break c;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "watcher sees the new owner"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert_eq!(seen.formats, vec![ClipFormat::TEXT, ClipFormat::PNG]);
+    assert!(
+        oc.0.lock().unwrap().iter().any(|c| c.own),
+        "the owner sees its own takeover"
+    );
+    assert_eq!(
+        watcher.read(ClipFormat::TEXT).unwrap().unwrap(),
+        "привет".as_bytes()
+    );
+    assert_eq!(watcher.read(ClipFormat::PNG).unwrap().unwrap(), image);
+    assert_eq!(watcher.read(ClipFormat::HTML).unwrap(), None);
+    owner.stop();
+    watcher.stop();
+}

@@ -30,7 +30,7 @@
 | 3 | `9e6834a` | mDNS (`mdns-sd`), SPAKE2-сопряжение по коду и QR, `trust.toml`, права, отзыв, лимиты рукопожатий |
 | 4a | `b4330e2` | геометрия, InputRouter, KeyTracker, хоткеи, сторож, синхронизация раскладки, фича `input`, mock-платформа |
 | 4b | `dbc4455` | Windows (LL-хуки + SendInput) и X11 (XInput2 + XTest + RandR), ввод включён в `bridged` |
-| 4c (часть) | `3d51159` | таблица HID ↔ macOS `kVK_*` в `crates/platform/src/keymap.rs` |
+| 4c | `3d51159`, `a214883` | macOS (CGEventTap + CGEventPost, онбординг Accessibility; только `clippy --target aarch64-apple-darwin`), Wayland (InputCapture + RemoteDesktop + EIS через `ashpd`/`reis`; на композиторе не проверено) |
 
 Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92%.
 

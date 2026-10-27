@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use bridge_daemon::{NodeBuilder, TrustStore, bind_transport, ipc_handler};
 use bridge_discovery::MdnsDiscovery;
+use bridge_feature_clipboard::{ClipboardConfig, ClipboardFeature};
 use bridge_feature_input::{InputConfig, InputFeature, Wake};
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
@@ -38,6 +39,9 @@ struct Args {
     /// Do not share the mouse and keyboard (no input hooks).
     #[arg(long)]
     no_input: bool,
+    /// Do not share the clipboard.
+    #[arg(long)]
+    no_clipboard: bool,
     /// IPC endpoint (named pipe or socket path).
     #[arg(long)]
     ipc: Option<String>,
@@ -103,6 +107,20 @@ async fn run(args: Args) -> Result<(), String> {
                 screens_source = Some(screens);
             }
             Err(e) => warn!("mouse and keyboard sharing is unavailable: {e}"),
+        }
+    }
+    if !args.no_clipboard {
+        match bridge_platform::native_clipboard() {
+            Ok(clipboard) => {
+                let post = builder
+                    .local_sender(bridge_protocol::FeatureId::CLIPBOARD)
+                    .into_post();
+                match ClipboardFeature::new(clipboard, ClipboardConfig::default(), post) {
+                    Ok(f) => builder = builder.feature(f).map_err(|e| e.to_string())?,
+                    Err(e) => warn!("clipboard sharing is unavailable: {e}"),
+                }
+            }
+            Err(e) => warn!("clipboard sharing is unavailable: {e}"),
         }
     }
     if !args.no_mdns {

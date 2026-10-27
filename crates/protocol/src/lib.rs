@@ -10,6 +10,7 @@
 
 mod bounded;
 mod channel;
+pub mod clipboard;
 pub mod control;
 mod envelope;
 mod error;
@@ -21,7 +22,7 @@ mod message;
 pub mod strategy;
 mod version;
 
-pub use bounded::{BoundedString, BoundedVec};
+pub use bounded::{BoundedBytes, BoundedString, BoundedVec};
 pub use channel::{ChannelClass, CloseCode};
 pub use envelope::{DATAGRAM_FORMAT, Envelope, EnvelopeRef, decode_datagram, encode_datagram};
 pub use error::{DecodeError, EncodeError};

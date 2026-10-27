@@ -51,7 +51,18 @@
 | 3 | готово, коммит `9e6834a` |
 | 4a | готово, коммит `b4330e2` |
 | 4b | готово (см. git log): Windows (LL-хуки, `SendInput`, мониторы с DPI, раскладка, lock-клавиши), X11 (XInput2 raw, grab, XTest, RandR), таблицы HID ↔ set 1 / evdev, `bridged` включает ввод сам; нативные тесты: Windows (`BRIDGE_PLATFORM_TESTS=1`), X11 под Xvfb/WSLg. Оверлеи (подсветка края, локатор) перенесены в веху 9 — их рисует UI-процесс |
-| 4c | готово (хеш коммита — в HANDOFF.md): macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
+| 4c | готово, коммит `a214883`: macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
+| 5 | готово (хеш — в HANDOFF.md): протокол буфера, фича с ленивой выдачей, mock + интеграционные тесты, Windows (отложенный рендеринг, исключение из журнала Win+V) и X11 (владение `CLIPBOARD`, XFixes, INCR) с нативными тестами. macOS и чистый Wayland — `Unsupported` |
+
+## Перенесено в конец этапа: macOS
+
+Владелец попросил закончить всё по macOS в последнюю очередь: у него нет техники Apple, проверить нечем.
+Ввод (веха 4c) уже написан и собирается. Остальное (`TODO(macOS-final)`):
+
+- буфер обмена (`NSPasteboard`, опрос `changeCount`, data provider, `org.nspasteboard.ConcealedType`);
+- перетаскивание (file promises), виртуальные MIDI-порты CoreMIDI, `NetworkMonitor`;
+- синхронизация раскладки (Text Input Sources), Caps Lock через IOKit;
+- сборка Tauri-приложения и подпись/нотаризация.
 
 ## Отложено с этапа 1 (явные TODO)
 

@@ -8,8 +8,8 @@ use bridge_protocol::input::{HidUsage, LayoutTag, LockState, MouseButton};
 use tokio::sync::Notify;
 
 use crate::{
-    CaptureEvent, CaptureSink, Decision, InputCapture, InputInjector, LocalScreen, Platform,
-    PlatformError, ScreenInfo,
+    CaptureEvent, CaptureSink, ClipChange, ClipFormat, Clipboard, ClipboardProvider, ClipboardSink,
+    Decision, InputCapture, InputInjector, LocalScreen, Platform, PlatformError, ScreenInfo,
 };
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -196,11 +196,135 @@ impl ScreenInfo for MockScreens {
     }
 }
 
+enum Contents {
+    Local(Vec<(ClipFormat, Vec<u8>)>),
+    Announced(Vec<ClipFormat>, Arc<dyn ClipboardProvider>),
+}
+
+/// A clipboard the test copies into and pastes from, as a user would.
+pub struct MockClipboard {
+    sink: Mutex<Option<Arc<dyn ClipboardSink>>>,
+    contents: Mutex<Contents>,
+    announces: Mutex<u32>,
+    changed: Notify,
+}
+
+impl Default for MockClipboard {
+    fn default() -> Self {
+        Self {
+            sink: Mutex::new(None),
+            contents: Mutex::new(Contents::Local(Vec::new())),
+            announces: Mutex::new(0),
+            changed: Notify::new(),
+        }
+    }
+}
+
+impl MockClipboard {
+    /// A local application copies `items`.
+    pub fn copy(&self, items: &[(ClipFormat, &[u8])], concealed: bool) {
+        let items: Vec<_> = items.iter().map(|(f, d)| (*f, d.to_vec())).collect();
+        let formats = items.iter().map(|(f, _)| *f).collect();
+        *lock(&self.contents) = Contents::Local(items);
+        if let Some(s) = lock(&self.sink).clone() {
+            s.changed(ClipChange {
+                formats,
+                own: false,
+                concealed,
+            });
+        }
+    }
+
+    /// A local application pastes `format`; blocks while a remote provider fetches it.
+    pub fn paste(&self, format: ClipFormat) -> Option<Vec<u8>> {
+        let provider = match &*lock(&self.contents) {
+            Contents::Local(items) => {
+                return items
+                    .iter()
+                    .find(|(f, _)| *f == format)
+                    .map(|(_, d)| d.clone());
+            }
+            Contents::Announced(formats, p) => formats.contains(&format).then(|| p.clone())?,
+        };
+        provider.render(format)
+    }
+
+    pub fn announced_formats(&self) -> Option<Vec<ClipFormat>> {
+        match &*lock(&self.contents) {
+            Contents::Announced(f, _) => Some(f.clone()),
+            Contents::Local(_) => None,
+        }
+    }
+
+    pub fn announce_count(&self) -> u32 {
+        *lock(&self.announces)
+    }
+
+    /// Waits until a remote offer is announced with `format` (or the timeout passes).
+    pub async fn wait_announced(&self, timeout: std::time::Duration, format: ClipFormat) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.changed.notified();
+                if self
+                    .announced_formats()
+                    .is_some_and(|f| f.contains(&format))
+                {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+impl Clipboard for MockClipboard {
+    fn start(&self, sink: Arc<dyn ClipboardSink>) -> Result<(), PlatformError> {
+        *lock(&self.sink) = Some(sink);
+        Ok(())
+    }
+
+    fn read(&self, format: ClipFormat) -> Result<Option<Vec<u8>>, PlatformError> {
+        match &*lock(&self.contents) {
+            Contents::Local(items) => Ok(items
+                .iter()
+                .find(|(f, _)| *f == format)
+                .map(|(_, d)| d.clone())),
+            Contents::Announced(..) => Ok(None),
+        }
+    }
+
+    fn announce(
+        &self,
+        formats: &[ClipFormat],
+        provider: Arc<dyn ClipboardProvider>,
+    ) -> Result<(), PlatformError> {
+        *lock(&self.contents) = Contents::Announced(formats.to_vec(), provider);
+        *lock(&self.announces) += 1;
+        self.changed.notify_waiters();
+        // Real OSes report our own takeover as a change too.
+        if let Some(s) = lock(&self.sink).clone() {
+            s.changed(ClipChange {
+                formats: formats.to_vec(),
+                own: true,
+                concealed: false,
+            });
+        }
+        Ok(())
+    }
+
+    fn stop(&self) {
+        *lock(&self.sink) = None;
+    }
+}
+
 /// A full mock platform plus typed handles to drive and inspect it.
 pub struct MockPlatform {
     pub capture: Arc<MockCapture>,
     pub injector: Arc<MockInjector>,
     pub screens: Arc<MockScreens>,
+    pub clipboard: Arc<MockClipboard>,
 }
 
 impl MockPlatform {
@@ -209,6 +333,7 @@ impl MockPlatform {
             capture: Arc::new(MockCapture::default()),
             injector: Arc::new(MockInjector::default()),
             screens: Arc::new(MockScreens::single_hd()),
+            clipboard: Arc::new(MockClipboard::default()),
         }
     }
 
