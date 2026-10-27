@@ -18,11 +18,15 @@ tokio = { workspace = true, features = ["time", "rt-multi-thread"] }
 [dev-dependencies]
 bridge-discovery.workspace = true
 bridge-feature-clipboard.workspace = true
+bridge-feature-files.workspace = true
 bytes.workspace = true
 criterion.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["time", "rt-multi-thread", "macros"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[target."cfg(windows)".dev-dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Media"] }
 
 [[bench]]
 name = "input_latency"

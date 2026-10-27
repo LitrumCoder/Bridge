@@ -46,7 +46,16 @@ pub enum Request {
         granted: Vec<u16>,
     },
     Shutdown,
-    // TODO(M6a): Send; TODO(M8): Pause, Leave, Rejoin;
+    /// Send files and folders to a device (paths on this machine).
+    Send {
+        device: String,
+        paths: Vec<String>,
+    },
+    Transfers,
+    CancelTransfer {
+        id: String,
+    },
+    // TODO(M8): Pause, Leave, Rejoin;
     // TODO(M9): Subscribe for the desktop UI event stream.
 }
 
@@ -92,6 +101,23 @@ pub enum Response {
         device: DeviceId,
     },
     Error(String),
+    Transfer {
+        id: String,
+    },
+    Transfers(Vec<TransferEntry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransferEntry {
+    pub id: String,
+    pub device: DeviceId,
+    pub outgoing: bool,
+    pub items: u32,
+    pub bytes: u64,
+    pub done_bytes: u64,
+    /// `running`, `done`, `cancelled`, `failed: …`, `declined: …`.
+    pub state: String,
+    pub names: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

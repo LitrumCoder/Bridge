@@ -23,6 +23,7 @@ use crate::api::{
     TransportCaps,
 };
 use crate::identity::device_id_from_cert;
+use crate::ledbat::LedbatConfig;
 use crate::verify::{PinnedClientVerifier, PinnedServerVerifier};
 use crate::{CloseInfo, ClosedBy, DeviceIdentity, ExpectedPeer, TransportError, TrustPolicy};
 
@@ -268,13 +269,23 @@ impl Transport for QuicTransport {
     }
 }
 
-fn transport_config(options: &QuicOptions) -> Result<Arc<quinn::TransportConfig>, TransportError> {
+fn transport_config(
+    options: &QuicOptions,
+    kind: ConnectionKind,
+) -> Result<Arc<quinn::TransportConfig>, TransportError> {
     let mut t = quinn::TransportConfig::default();
     t.keep_alive_interval(Some(options.keep_alive));
     let idle = IdleTimeout::try_from(options.idle_timeout)
         .map_err(|_| TransportError::Other("idle timeout out of range".into()))?;
     t.max_idle_timeout(Some(idle));
-    // TODO(M6a): delay-based congestion controller for bulk connections (ADR-0002).
+    if kind == ConnectionKind::Bulk {
+        // Files only flow from the dialing side of a bulk connection (each side dials its
+        // own to send), so the client config is where the controller matters.
+        t.congestion_controller_factory(Arc::new(LedbatConfig::default()));
+        t.send_window(16 * 1024 * 1024);
+        t.stream_receive_window(VarInt::from_u32(8 * 1024 * 1024));
+        t.receive_window(VarInt::from_u32(16 * 1024 * 1024));
+    }
     Ok(Arc::new(t))
 }
 
@@ -293,7 +304,7 @@ fn server_config(
     tls.alpn_protocols = vec![ALPN_INTERACTIVE.to_vec(), ALPN_BULK.to_vec()];
     let quic = QuicServerConfig::try_from(tls).map_err(|e| TransportError::Tls(e.to_string()))?;
     let mut server = quinn::ServerConfig::with_crypto(Arc::new(quic));
-    server.transport_config(transport_config(options)?);
+    server.transport_config(transport_config(options, ConnectionKind::Interactive)?);
     Ok(server)
 }
 
@@ -317,7 +328,7 @@ fn client_config(
     }];
     let quic = QuicClientConfig::try_from(tls).map_err(|e| TransportError::Tls(e.to_string()))?;
     let mut client = quinn::ClientConfig::new(Arc::new(quic));
-    client.transport_config(transport_config(options)?);
+    client.transport_config(transport_config(options, kind)?);
     Ok(client)
 }
 

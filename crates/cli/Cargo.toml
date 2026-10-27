@@ -16,7 +16,7 @@ bridge-protocol.workspace = true
 clap.workspace = true
 qrcode = { version = "0.14.1", default-features = false }
 serde_json = "1.0.154"
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 
 [lints]
 workspace = true

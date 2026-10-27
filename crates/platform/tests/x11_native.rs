@@ -56,17 +56,22 @@ fn xtest_injection_is_seen_by_xinput2_capture() {
     // XWayland (e.g. WSLg) starts lazily; give the server a moment to wire up input.
     std::thread::sleep(Duration::from_millis(300));
 
-    injector.key(HidUsage::A, true).unwrap();
-    injector.key(HidUsage::A, false).unwrap();
-    assert!(
-        wait(&rec, |l| l.contains(&CaptureEvent::Key {
-            usage: HidUsage::A,
-            down: true,
-            repeat: false
-        })),
-        "key down; captured: {:?}",
-        rec.0.lock().unwrap()
-    );
+    // A freshly started XWayland can drop the very first events; retry a few times.
+    let down = CaptureEvent::Key {
+        usage: HidUsage::A,
+        down: true,
+        repeat: false,
+    };
+    let mut seen = false;
+    for _ in 0..5 {
+        injector.key(HidUsage::A, true).unwrap();
+        injector.key(HidUsage::A, false).unwrap();
+        if wait(&rec, |l| l.contains(&down)) {
+            seen = true;
+            break;
+        }
+    }
+    assert!(seen, "key down; captured: {:?}", rec.0.lock().unwrap());
     assert!(
         wait(&rec, |l| l.contains(&CaptureEvent::Key {
             usage: HidUsage::A,

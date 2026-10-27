@@ -40,7 +40,8 @@ impl Default for ClipboardConfig {
     }
 }
 
-/// Formats offered to peers. `FILES` waits for the files engine (TODO(M6a)).
+/// Formats offered to peers. `FILES` needs virtual files in the OS clipboard, the same
+/// data object as drag and drop (TODO(M6b)).
 const SHARED: [ClipFormat; 4] = [
     ClipFormat::TEXT,
     ClipFormat::HTML,

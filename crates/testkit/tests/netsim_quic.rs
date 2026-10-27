@@ -128,6 +128,12 @@ async fn partition_is_detected_by_idle_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bottleneck_limits_throughput() {
+    // The bulk controller reads coarse Windows timers in the simulator as queuing delay.
+    #[cfg(windows)]
+    // SAFETY: plain call; the period is restored when the process exits.
+    unsafe {
+        windows_sys::Win32::Media::timeBeginPeriod(1);
+    }
     let net = Network::new(3);
     net.set_default_link(LinkConfig {
         latency: Duration::from_millis(2),

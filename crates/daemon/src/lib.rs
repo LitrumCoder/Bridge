@@ -1,6 +1,7 @@
 //! Node assembly: wires transport, discovery, platform services and features together,
 //! and serves the local IPC API.
 
+mod bulk;
 mod node;
 mod pairing_uri;
 mod trust;
@@ -9,7 +10,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bridge_core::PairingSecret;
-use bridge_ipc::{DeviceEntry, IpcHandler, NearbyEntry, PairTarget, Request, Response};
+use bridge_feature_files::{Direction, FilesHandle, TransferState, TransferStatus};
+use bridge_ipc::{
+    DeviceEntry, IpcHandler, NearbyEntry, PairTarget, Request, Response, TransferEntry,
+};
 use bridge_protocol::{DeviceId, PermissionId};
 use bridge_transport::ExpectedPeer;
 use tokio::sync::Notify;
@@ -20,17 +24,89 @@ pub use trust::{ALL_PERMISSIONS, TrustStore, TrustedPeer, unix_now};
 
 // TODO(M9): autostart registration.
 
+/// Feature handles the IPC API reaches into.
+#[derive(Clone, Default)]
+pub struct Services {
+    pub files: Option<FilesHandle>,
+}
+
 /// IPC request handler for a running node. `shutdown` is notified on `Request::Shutdown`.
-pub fn ipc_handler(node: NodeHandle, shutdown: Arc<Notify>) -> IpcHandler {
+pub fn ipc_handler(node: NodeHandle, shutdown: Arc<Notify>, services: Services) -> IpcHandler {
     Arc::new(move |req| {
         let node = node.clone();
         let shutdown = shutdown.clone();
-        Box::pin(async move { handle_request(&node, &shutdown, req).await })
+        let services = services.clone();
+        Box::pin(async move { handle_request(&node, &shutdown, &services, req).await })
     })
 }
 
-async fn handle_request(node: &NodeHandle, shutdown: &Notify, req: Request) -> Response {
+fn transfer_entry(s: TransferStatus) -> TransferEntry {
+    let state = match s.state {
+        TransferState::Running => "running".to_owned(),
+        TransferState::Done => "done".to_owned(),
+        TransferState::Cancelled => "cancelled".to_owned(),
+        TransferState::Failed(why) => format!("failed: {why}"),
+        TransferState::Declined(r) => format!("declined: {r:?}"),
+    };
+    TransferEntry {
+        id: s.id.to_string(),
+        device: s.peer,
+        outgoing: s.direction == Direction::Outgoing,
+        items: s.items,
+        bytes: s.bytes,
+        done_bytes: s.done_bytes,
+        state,
+        names: s.names,
+    }
+}
+
+async fn files_request(node: &NodeHandle, files: &FilesHandle, req: Request) -> Response {
     match req {
+        Request::Send { device, paths } => {
+            let Some(id) = resolve(node, &device) else {
+                return Response::Error(format!("no paired device matches {device}"));
+            };
+            match files
+                .send(id, paths.into_iter().map(Into::into).collect())
+                .await
+            {
+                Ok(t) => Response::Transfer { id: t.to_string() },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::Transfers => {
+            Response::Transfers(files.transfers().into_iter().map(transfer_entry).collect())
+        }
+        Request::CancelTransfer { id } => {
+            let found = files
+                .transfers()
+                .into_iter()
+                .find(|t| t.id.to_string().starts_with(&id.to_lowercase()));
+            match found {
+                Some(t) => {
+                    files.cancel(t.id);
+                    Response::Ok
+                }
+                None => Response::Error(format!("no transfer {id}")),
+            }
+        }
+        _ => Response::Error("unexpected request".into()),
+    }
+}
+
+async fn handle_request(
+    node: &NodeHandle,
+    shutdown: &Notify,
+    services: &Services,
+    req: Request,
+) -> Response {
+    match req {
+        r @ (Request::Send { .. } | Request::Transfers | Request::CancelTransfer { .. }) => {
+            match &services.files {
+                Some(f) => files_request(node, f, r).await,
+                None => Response::Error("file transfers are disabled on this device".into()),
+            }
+        }
         Request::Status => Response::Status(node.status()),
         Request::Devices => {
             let status = node.status();
@@ -156,10 +232,17 @@ async fn pair(node: &NodeHandle, target: PairTarget, code: &str) -> Response {
     }
 }
 
-/// Finds a paired device by full id or a unique fingerprint prefix.
+/// Finds a paired device by full id, a unique fingerprint prefix or its name.
 fn resolve(node: &NodeHandle, text: &str) -> Option<DeviceId> {
     let text = text.to_lowercase();
     let all = node.trust().all();
+    let named: Vec<_> = all
+        .iter()
+        .filter(|p| p.name.as_deref().is_some_and(|n| n.to_lowercase() == text))
+        .collect();
+    if let [one] = named.as_slice() {
+        return Some(one.id);
+    }
     let matches: Vec<_> = all
         .iter()
         .filter(|p| p.id.to_base32().starts_with(&text))

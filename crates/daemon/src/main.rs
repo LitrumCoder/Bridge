@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use bridge_daemon::{NodeBuilder, TrustStore, bind_transport, ipc_handler};
+use bridge_daemon::{NodeBuilder, Services, TrustStore, bind_transport, ipc_handler};
 use bridge_discovery::MdnsDiscovery;
 use bridge_feature_clipboard::{ClipboardConfig, ClipboardFeature};
+use bridge_feature_files::{FilesConfig, FilesFeature};
 use bridge_feature_input::{InputConfig, InputFeature, Wake};
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
@@ -42,6 +43,12 @@ struct Args {
     /// Do not share the clipboard.
     #[arg(long)]
     no_clipboard: bool,
+    /// Do not send or receive files.
+    #[arg(long)]
+    no_files: bool,
+    /// Where received files go (default: Downloads/Bridge).
+    #[arg(long)]
+    download_dir: Option<PathBuf>,
     /// IPC endpoint (named pipe or socket path).
     #[arg(long)]
     ipc: Option<String>,
@@ -123,6 +130,25 @@ async fn run(args: Args) -> Result<(), String> {
             Err(e) => warn!("clipboard sharing is unavailable: {e}"),
         }
     }
+    let mut services = Services::default();
+    if !args.no_files {
+        let post = builder
+            .local_sender(bridge_protocol::FeatureId::FILES)
+            .into_post();
+        let (link, incoming) = builder.bulk();
+        let downloads = args
+            .download_dir
+            .clone()
+            .or_else(|| {
+                directories::UserDirs::new()
+                    .and_then(|u| u.download_dir().map(|d| d.join("Bridge")))
+            })
+            .unwrap_or_else(|| data_dir.join("received"));
+        let (feature, handle) =
+            FilesFeature::new(FilesConfig::new(downloads), link, incoming, post);
+        builder = builder.feature(feature).map_err(|e| e.to_string())?;
+        services.files = Some(handle);
+    }
     if !args.no_mdns {
         match MdnsDiscovery::start(id) {
             Ok(d) => builder = builder.discovery(d),
@@ -167,7 +193,7 @@ async fn run(args: Args) -> Result<(), String> {
 
     let shutdown = Arc::new(Notify::new());
     let server = IpcServer::bind(&endpoint).map_err(|e| format!("ipc endpoint {endpoint}: {e}"))?;
-    tokio::spawn(server.serve(ipc_handler(node.clone(), shutdown.clone())));
+    tokio::spawn(server.serve(ipc_handler(node.clone(), shutdown.clone(), services)));
 
     tokio::select! {
         _ = shutdown.notified() => info!("shutdown requested over ipc"),

@@ -10,7 +10,7 @@ use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use serde_json::json;
 
-// TODO(M6a): send; TODO(M8): pause, leave, rejoin.
+// TODO(M8): pause, leave, rejoin.
 #[derive(Parser)]
 #[command(
     name = "bridge",
@@ -65,6 +65,19 @@ enum Command {
     },
     /// Keep a connection to a paired device at a fixed address (manual add by IP).
     Connect { addr: SocketAddr, device_id: String },
+    /// Send files or folders to a paired device (name or fingerprint prefix).
+    Send {
+        device: String,
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+        /// Wait and show progress until the transfer ends.
+        #[arg(long)]
+        wait: bool,
+    },
+    /// File transfers in progress and recently finished.
+    Transfers,
+    /// Cancel a transfer (id prefix from `bridge transfers`).
+    Cancel { id: String },
     /// Stop the daemon.
     Shutdown,
 }
@@ -169,9 +182,68 @@ async fn run(cli: Cli) -> Result<(), String> {
             device: DeviceId::from_base32(&device_id).ok_or("invalid device id")?,
         },
         Command::Shutdown => Request::Shutdown,
+        Command::Send {
+            device,
+            paths,
+            wait,
+        } => {
+            let paths = paths
+                .iter()
+                .map(|p| {
+                    std::fs::canonicalize(p)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .map_err(|e| format!("{}: {e}", p.display()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let Response::Transfer { id } = call(Request::Send { device, paths }).await? else {
+                return Err("unexpected reply".into());
+            };
+            if !wait {
+                return print_response(Response::Transfer { id }, cli.json);
+            }
+            loop {
+                let Response::Transfers(list) = call(Request::Transfers).await? else {
+                    return Err("unexpected reply".into());
+                };
+                let Some(t) = list.into_iter().find(|t| t.id == id) else {
+                    return Err("the transfer disappeared".into());
+                };
+                if !cli.json {
+                    eprint!(
+                        "\r{:>6.1}%  {}  {}   ",
+                        percent(&t),
+                        t.state,
+                        t.names.join(", ")
+                    );
+                }
+                if t.state != "running" {
+                    if !cli.json {
+                        eprintln!();
+                    }
+                    let ok = t.state == "done";
+                    print_response(Response::Transfers(vec![t]), cli.json)?;
+                    return if ok {
+                        Ok(())
+                    } else {
+                        Err("the transfer did not complete".into())
+                    };
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+        Command::Transfers => Request::Transfers,
+        Command::Cancel { id } => Request::CancelTransfer { id },
     };
     let response = call(request).await?;
     print_response(response, cli.json)
+}
+
+fn percent(t: &bridge_ipc::TransferEntry) -> f64 {
+    if t.bytes == 0 {
+        100.0
+    } else {
+        t.done_bytes as f64 * 100.0 / t.bytes as f64
+    }
 }
 
 fn permission_names(granted: &[u16]) -> Vec<&'static str> {
@@ -208,6 +280,47 @@ fn print_response(response: Response, as_json: bool) -> Result<(), String> {
                 println!("{}", json!({ "ok": true }));
             } else {
                 println!("ok");
+            }
+        }
+        Response::Transfer { id } => {
+            if as_json {
+                println!("{}", json!({ "transfer": id }));
+            } else {
+                println!(
+                    "transfer {} started; `bridge transfers` shows progress",
+                    &id[..8.min(id.len())]
+                );
+            }
+        }
+        Response::Transfers(list) => {
+            if as_json {
+                let v: Vec<_> = list
+                    .iter()
+                    .map(|t| {
+                        json!({
+                            "id": t.id, "device": t.device.to_base32(), "outgoing": t.outgoing,
+                            "items": t.items, "bytes": t.bytes, "done_bytes": t.done_bytes,
+                            "state": t.state, "names": t.names,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::Value::Array(v));
+            } else if list.is_empty() {
+                println!("no transfers");
+            } else {
+                for t in &list {
+                    println!(
+                        "{}  {} {}  {:>6.1}%  {} items, {} bytes  {}  {}",
+                        &t.id[..8.min(t.id.len())],
+                        if t.outgoing { "→" } else { "←" },
+                        t.device.fingerprint(),
+                        percent(t),
+                        t.items,
+                        t.bytes,
+                        t.state,
+                        t.names.join(", ")
+                    );
+                }
             }
         }
         Response::Paired { device } => {

@@ -77,6 +77,7 @@ pub fn native_clipboard() -> Result<Arc<dyn Clipboard>, PlatformError> {
 }
 
 // TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
+// TODO(M6b): FILES clipboard format through the files engine.
 // TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 
 #[derive(Debug, Clone, thiserror::Error)]

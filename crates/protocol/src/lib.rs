@@ -14,6 +14,7 @@ pub mod clipboard;
 pub mod control;
 mod envelope;
 mod error;
+pub mod files;
 mod frame;
 mod ids;
 pub mod input;

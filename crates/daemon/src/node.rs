@@ -27,6 +27,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::bulk::BulkHub;
 use crate::pairing_uri::PairingInvite;
 use crate::trust::{ALL_PERMISSIONS, TrustStore, TrustedPeer};
 
@@ -106,6 +107,7 @@ pub struct NodeBuilder {
     screens: Vec<bridge_core::LocalScreen>,
     input_tx: mpsc::UnboundedSender<Input>,
     input_rx: mpsc::UnboundedReceiver<Input>,
+    bulk: Arc<BulkHub>,
 }
 
 impl NodeBuilder {
@@ -122,7 +124,20 @@ impl NodeBuilder {
             screens: Vec::new(),
             input_tx,
             input_rx,
+            bulk: Arc::default(),
         }
+    }
+
+    /// File-data streams to and from peers (bulk connections, ADR-0002).
+    pub fn bulk(
+        &self,
+    ) -> (
+        Arc<dyn bridge_transport::BulkLink>,
+        bridge_transport::BulkIncoming,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.bulk.set_incoming(tx);
+        (self.bulk.clone(), rx)
     }
 
     /// A channel into `feature` that can be created before the node starts.
@@ -190,6 +205,7 @@ impl NodeBuilder {
             core.set_local_screens(Micros::ZERO, self.screens.clone());
         }
         let transport = Arc::new(transport);
+        self.bulk.set_transport(transport.clone());
         let (input_tx, input_rx) = (self.input_tx, self.input_rx);
         let (events, _) = broadcast::channel(256);
         let (connected_tx, connected_rx) = watch::channel(HashSet::new());
@@ -214,6 +230,7 @@ impl NodeBuilder {
                 nearby: Mutex::new(HashMap::new()),
                 discovery: self.discovery.clone(),
                 listen,
+                bulk: self.bulk.clone(),
             }),
         };
         let driver = Driver {
@@ -262,6 +279,7 @@ struct Inner {
     nearby: Mutex<HashMap<DeviceId, Discovered>>,
     discovery: Option<Arc<dyn Discovery>>,
     listen: SocketAddr,
+    bulk: Arc<BulkHub>,
 }
 
 /// Cheap, cloneable handle to a running node.
@@ -505,6 +523,8 @@ impl NodeHandle {
         role: Role,
         pair: Option<PairingSecret>,
     ) -> Result<(ConnId, oneshot::Receiver<CloseInfo>), TransportError> {
+        let PeerAddr::Ip(remote) = conn.remote();
+        self.inner.bulk.note_peer(conn.peer(), remote);
         let priority = 100;
         let (mut send, mut recv) = match role {
             Role::Initiator => {
@@ -552,6 +572,9 @@ impl NodeHandle {
 async fn accept_loop(node: NodeHandle) {
     while let Some(result) = node.inner.transport.accept().await {
         match result {
+            Ok(conn) if conn.kind() == bridge_core::ConnectionKind::Bulk => {
+                tokio::spawn(node.inner.bulk.clone().serve(conn));
+            }
             Ok(conn) => {
                 let node = node.clone();
                 tokio::spawn(async move {

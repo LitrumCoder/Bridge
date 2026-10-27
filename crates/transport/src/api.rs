@@ -88,6 +88,15 @@ pub trait Connection: Send + Sync + 'static {
     fn closed(&self) -> BoxFuture<'_, CloseInfo>;
 }
 
+/// Streams for file data on a separate bulk connection to a peer (ADR-0002). Each side
+/// dials its own bulk connection to send, lazily, on the first stream.
+pub trait BulkLink: Send + Sync + 'static {
+    fn open(&self, peer: DeviceId) -> BoxFuture<'_, Result<Box<dyn SendStream>, TransportError>>;
+}
+
+/// Incoming bulk streams with the peer they came from.
+pub type BulkIncoming = tokio::sync::mpsc::UnboundedReceiver<(DeviceId, Box<dyn RecvStream>)>;
+
 pub trait SendStream: Send + 'static {
     fn write_all<'a>(&'a mut self, buf: &'a [u8]) -> BoxFuture<'a, Result<(), TransportError>>;
     fn finish(&mut self) -> Result<(), TransportError>;
