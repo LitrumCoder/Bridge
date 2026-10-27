@@ -419,6 +419,11 @@ impl Core {
         out
     }
 
+    /// What the peer last announced about itself.
+    pub fn peer_state(&self, peer: &PeerId) -> Option<DeviceState> {
+        Some(self.sessions.get(self.primary.get(peer)?)?.remote_state)
+    }
+
     pub fn clock(&self, peer: &PeerId) -> Option<ClockEstimate> {
         self.sessions.get(self.primary.get(peer)?)?.clock.estimate()
     }

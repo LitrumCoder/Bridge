@@ -55,7 +55,21 @@ pub enum Request {
     CancelTransfer {
         id: String,
     },
-    // TODO(M8): Pause, Leave, Rejoin;
+    /// Device state (ARCHITECTURE §4.2).
+    Pause,
+    Resume,
+    Leave,
+    Rejoin,
+    /// Saved network profiles (ADR-0016).
+    Profiles,
+    /// Remember the current network as a profile.
+    SaveProfile {
+        name: String,
+        auto_join: bool,
+    },
+    ForgetProfile {
+        name: String,
+    },
     // TODO(M9): Subscribe for the desktop UI event stream.
 }
 
@@ -105,6 +119,16 @@ pub enum Response {
         id: String,
     },
     Transfers(Vec<TransferEntry>),
+    Profiles(Vec<ProfileEntry>),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProfileEntry {
+    pub name: String,
+    pub networks: u32,
+    pub auto_join: bool,
+    /// This device is on this profile's network now.
+    pub current: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

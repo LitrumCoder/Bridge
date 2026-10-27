@@ -41,7 +41,7 @@ impl Default for ClipboardConfig {
 }
 
 /// Formats offered to peers. `FILES` needs virtual files in the OS clipboard, the same
-/// data object as drag and drop (TODO(M6b)).
+/// data object as drag and drop (TODO(M6b+)).
 const SHARED: [ClipFormat; 4] = [
     ClipFormat::TEXT,
     ClipFormat::HTML,
@@ -120,6 +120,11 @@ pub struct ClipboardFeature {
     /// The peer offer currently in our OS clipboard.
     remote: Option<(PeerId, u64)>,
     fetching: HashMap<(PeerId, u64, ClipFormat), Fetching>,
+    /// Paused or left devices do not share their clipboard.
+    active: bool,
+    /// Our current offer, for peers that connect or start allowing us later.
+    last_offer: Option<Offer>,
+    sent_to: std::collections::HashSet<PeerId>,
 }
 
 impl ClipboardFeature {
@@ -139,6 +144,9 @@ impl ClipboardFeature {
             cached: HashMap::new(),
             remote: None,
             fetching: HashMap::new(),
+            active: true,
+            last_offer: None,
+            sent_to: std::collections::HashSet::new(),
         })
     }
 
@@ -158,13 +166,15 @@ impl ClipboardFeature {
     }
 
     fn local_changed(&mut self, cx: &mut FeatureCx<'_>, change: ClipChange) {
-        if change.own || !self.config.enabled {
+        if change.own || !self.config.enabled || !self.active {
             return;
         }
         self.seq += 1;
         self.remote = None;
         self.cached.clear();
         self.offered.clear();
+        self.last_offer = None;
+        self.sent_to.clear();
         if change.concealed {
             debug!("clipboard contents are marked as concealed; not shared");
             return;
@@ -212,17 +222,30 @@ impl ClipboardFeature {
         let Ok(formats) = BoundedVec::try_from_vec(formats) else {
             return;
         };
-        let offer = Offer {
+        self.last_offer = Some(Offer {
             seq: self.seq,
             formats,
+        });
+        self.offer_to_new(cx);
+    }
+
+    /// Sends the current offer to every target that has not seen it yet.
+    fn offer_to_new(&mut self, cx: &mut FeatureCx<'_>) {
+        let Some(offer) = self.last_offer.clone() else {
+            return;
         };
+        if !self.active {
+            return;
+        }
         for peer in Self::targets(cx) {
-            Self::send(cx, peer, offer.clone().into());
+            if self.sent_to.insert(peer) {
+                Self::send(cx, peer, offer.clone().into());
+            }
         }
     }
 
     fn remote_offer(&mut self, peer: PeerId, offer: Offer) {
-        if !self.config.enabled {
+        if !self.config.enabled || !self.active {
             return;
         }
         let mut formats = Vec::new();
@@ -411,9 +434,21 @@ impl Feature for ClipboardFeature {
         }
     }
 
-    fn on_peer_up(&mut self, _cx: &mut FeatureCx<'_>, _peer: PeerId, _version: u16) {}
+    fn on_peer_up(&mut self, cx: &mut FeatureCx<'_>, peer: PeerId, _version: u16) {
+        self.sent_to.remove(&peer);
+        self.offer_to_new(cx);
+    }
+
+    fn on_peer_update(&mut self, cx: &mut FeatureCx<'_>, _peer: PeerId) {
+        self.offer_to_new(cx);
+    }
+
+    fn on_device_state(&mut self, _cx: &mut FeatureCx<'_>, state: DeviceState) {
+        self.active = state == DeviceState::Connected;
+    }
 
     fn on_peer_down(&mut self, _cx: &mut FeatureCx<'_>, peer: PeerId, _reason: PeerDownReason) {
+        self.sent_to.remove(&peer);
         self.fail_fetches(|(p, _, _)| *p == peer);
     }
 

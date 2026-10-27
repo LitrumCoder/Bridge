@@ -10,7 +10,6 @@ use qrcode::QrCode;
 use qrcode::render::unicode::Dense1x2;
 use serde_json::json;
 
-// TODO(M8): pause, leave, rejoin.
 #[derive(Parser)]
 #[command(
     name = "bridge",
@@ -50,7 +49,9 @@ enum Command {
         code: Option<String>,
     },
     /// Forget a paired device.
-    Unpair { device: String },
+    Unpair {
+        device: String,
+    },
     /// Show or change what a paired device may do to this one.
     Permissions {
         device: String,
@@ -64,7 +65,10 @@ enum Command {
         midi: Option<bool>,
     },
     /// Keep a connection to a paired device at a fixed address (manual add by IP).
-    Connect { addr: SocketAddr, device_id: String },
+    Connect {
+        addr: SocketAddr,
+        device_id: String,
+    },
     /// Send files or folders to a paired device (name or fingerprint prefix).
     Send {
         device: String,
@@ -77,9 +81,38 @@ enum Command {
     /// File transfers in progress and recently finished.
     Transfers,
     /// Cancel a transfer (id prefix from `bridge transfers`).
-    Cancel { id: String },
+    Cancel {
+        id: String,
+    },
+    /// Pause: the cursor and the clipboard stop crossing; files and MIDI keep working.
+    Pause,
+    Resume,
+    /// Leave the group: disconnect from every device until `rejoin`.
+    Leave,
+    Rejoin,
+    /// Saved network profiles.
+    Profiles,
+    /// Remember or forget the current network as a profile.
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
     /// Stop the daemon.
     Shutdown,
+}
+
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Remember the current network under NAME.
+    Save {
+        name: String,
+        /// Rejoin automatically when this network comes back after leaving it.
+        #[arg(long)]
+        auto_join: bool,
+    },
+    Forget {
+        name: String,
+    },
 }
 
 fn on_off(s: &str) -> Result<bool, String> {
@@ -232,6 +265,17 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
         }
         Command::Transfers => Request::Transfers,
+        Command::Pause => Request::Pause,
+        Command::Resume => Request::Resume,
+        Command::Leave => Request::Leave,
+        Command::Rejoin => Request::Rejoin,
+        Command::Profiles => Request::Profiles,
+        Command::Profile {
+            action: ProfileAction::Save { name, auto_join },
+        } => Request::SaveProfile { name, auto_join },
+        Command::Profile {
+            action: ProfileAction::Forget { name },
+        } => Request::ForgetProfile { name },
         Command::Cancel { id } => Request::CancelTransfer { id },
     };
     let response = call(request).await?;
@@ -290,6 +334,33 @@ fn print_response(response: Response, as_json: bool) -> Result<(), String> {
                     "transfer {} started; `bridge transfers` shows progress",
                     &id[..8.min(id.len())]
                 );
+            }
+        }
+        Response::Profiles(list) => {
+            if as_json {
+                let v: Vec<_> = list
+                    .iter()
+                    .map(|p| json!({ "name": p.name, "networks": p.networks, "auto_join": p.auto_join, "current": p.current }))
+                    .collect();
+                println!("{}", serde_json::Value::Array(v));
+            } else if list.is_empty() {
+                println!(
+                    "no network profiles; `bridge profile save <name>` remembers this network"
+                );
+            } else {
+                for p in &list {
+                    println!(
+                        "{} {}  {} network(s){}",
+                        if p.current { "*" } else { " " },
+                        p.name,
+                        p.networks,
+                        if p.auto_join {
+                            ", rejoins automatically"
+                        } else {
+                            ""
+                        }
+                    );
+                }
             }
         }
         Response::Transfers(list) => {

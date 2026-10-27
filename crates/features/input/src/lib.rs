@@ -99,6 +99,8 @@ pub struct InputFeature {
     config: InputConfig,
     last_event: Option<RouterEvent>,
     listener: Option<RouterListener>,
+    /// This device paused or left: the cursor neither leaves nor arrives.
+    local_state: DeviceState,
 }
 
 impl InputFeature {
@@ -129,6 +131,7 @@ impl InputFeature {
             config,
             last_event: None,
             listener: None,
+            local_state: DeviceState::Connected,
         })
     }
 
@@ -156,9 +159,10 @@ impl InputFeature {
     }
 
     fn refresh_availability(&mut self, cx: &mut FeatureCx<'_>, peer: PeerId) {
-        let available = cx
-            .peer(&peer)
-            .is_some_and(|v| v.allows_us && v.state == DeviceState::Connected);
+        let available = self.local_state == DeviceState::Connected
+            && cx
+                .peer(&peer)
+                .is_some_and(|v| v.allows_us && v.state == DeviceState::Connected);
         self.shared.router().set_available(peer, available);
     }
 
@@ -260,6 +264,9 @@ impl Feature for InputFeature {
         payload: &[u8],
     ) -> Result<(), FeatureError> {
         let msg = InputMessage::decode(kind, payload)?;
+        if self.local_state != DeviceState::Connected {
+            return Ok(());
+        }
         let remap = self.remap_for(cx.peer(&peer).map(|v| v.platform));
         let actions = self.injected.on_message(peer, &msg, remap);
         self.apply(actions);
@@ -281,6 +288,19 @@ impl Feature for InputFeature {
 
     fn on_layout(&mut self, cx: &mut FeatureCx<'_>, layout: &LayoutUpdate) {
         self.shared.router().set_layout(Layout::from_update(layout));
+        self.drain(cx);
+    }
+
+    fn on_device_state(&mut self, cx: &mut FeatureCx<'_>, state: DeviceState) {
+        self.local_state = state;
+        let peers: Vec<PeerId> = cx.peers().iter().map(|p| p.id).collect();
+        for peer in peers {
+            self.refresh_availability(cx, peer);
+            if state != DeviceState::Connected {
+                let release = self.injected.source_gone(&peer);
+                self.apply(release);
+            }
+        }
         self.drain(cx);
     }
 

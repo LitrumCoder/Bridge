@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bridge_core::state::{DeviceStateMachine, NetworkFingerprint, NetworkProfile, StateCommand};
 use bridge_core::{
     Action, ConnId, ConnectInfo, Core, CoreConfig, CoreEvent, Entropy, Feature, FeatureRegistry,
     Micros, PairingSecret, PeerInfo, RegistryError, Role,
@@ -13,6 +14,7 @@ use bridge_core::{
 use bridge_discovery::{AdState, Advertisement, Discovered, Discovery, DiscoveryEvent};
 use bridge_ipc::{NodeStatus, PeerStatus};
 use bridge_protocol::control::DeviceState;
+use bridge_protocol::control::StateReason;
 use bridge_protocol::{
     ChannelClass, CloseCode, DeviceId, FrameDecoder, PROTOCOL_VERSION, PermissionId, Platform,
     ProtocolVersion, SessionToken, encode_frame,
@@ -108,6 +110,8 @@ pub struct NodeBuilder {
     input_tx: mpsc::UnboundedSender<Input>,
     input_rx: mpsc::UnboundedReceiver<Input>,
     bulk: Arc<BulkHub>,
+    profiles: Vec<NetworkProfile>,
+    profiles_path: Option<std::path::PathBuf>,
 }
 
 impl NodeBuilder {
@@ -125,7 +129,20 @@ impl NodeBuilder {
             input_tx,
             input_rx,
             bulk: Arc::default(),
+            profiles: Vec::new(),
+            profiles_path: None,
         }
+    }
+
+    /// Saved network profiles, and where to keep them when they change.
+    pub fn profiles(
+        mut self,
+        profiles: Vec<NetworkProfile>,
+        path: Option<std::path::PathBuf>,
+    ) -> Self {
+        self.profiles = profiles;
+        self.profiles_path = path;
+        self
     }
 
     /// File-data streams to and from peers (bulk connections, ADR-0002).
@@ -216,6 +233,7 @@ impl NodeBuilder {
             state: DeviceState::Connected,
             peers: Vec::new(),
             layout: core.layout().cloned(),
+            network_profile: None,
         }));
         let handle = NodeHandle {
             inner: Arc::new(Inner {
@@ -231,6 +249,8 @@ impl NodeBuilder {
                 discovery: self.discovery.clone(),
                 listen,
                 bulk: self.bulk.clone(),
+                left: std::sync::atomic::AtomicBool::new(false),
+                advertisement: Mutex::new(None),
             }),
         };
         let driver = Driver {
@@ -242,6 +262,9 @@ impl NodeBuilder {
             connected: connected_tx,
             status,
             trust: self.trust.clone(),
+            machine: DeviceStateMachine::new(self.profiles),
+            profiles_path: self.profiles_path,
+            node: Arc::downgrade(&handle.inner),
         };
         tokio::spawn(driver.run(input_rx));
         tokio::spawn(accept_loop(handle.clone()));
@@ -256,6 +279,11 @@ impl NodeBuilder {
             if let Err(e) = d.advertise(&ad) {
                 warn!("cannot announce this device: {e}");
             }
+            *handle
+                .inner
+                .advertisement
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(ad);
             tokio::spawn(discovery_loop(handle.clone(), d.subscribe()));
         }
         for peer in self.trust.all() {
@@ -280,6 +308,9 @@ struct Inner {
     discovery: Option<Arc<dyn Discovery>>,
     listen: SocketAddr,
     bulk: Arc<BulkHub>,
+    /// The device left the group: no dialling, incoming connections refused.
+    left: std::sync::atomic::AtomicBool,
+    advertisement: Mutex<Option<Advertisement>>,
 }
 
 /// Cheap, cloneable handle to a running node.
@@ -337,6 +368,81 @@ impl NodeHandle {
         tokio::time::timeout(timeout, rx.wait_for(|set| set.contains(&peer) == connected))
             .await
             .is_ok_and(|r| r.is_ok())
+    }
+
+    /// Pause, resume, leave the group or rejoin it (ARCHITECTURE §4.2).
+    pub fn set_state(&self, cmd: StateCommand) {
+        let _ = self.inner.input.send(Input::State(cmd));
+    }
+
+    /// What the network monitor sees now (`None`: no default route).
+    pub fn network_seen(&self, fp: Option<NetworkFingerprint>) {
+        let _ = self.inner.input.send(Input::Network(fp));
+    }
+
+    pub async fn profiles(&self) -> (Vec<NetworkProfile>, Option<String>) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.inner.input.send(Input::Profiles(tx));
+        rx.await.unwrap_or_default()
+    }
+
+    /// Remembers the current network as profile `name`.
+    pub async fn save_profile(&self, name: String, auto_join: bool) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.inner.input.send(Input::SaveProfile {
+            name,
+            auto_join,
+            reply: tx,
+        });
+        rx.await.unwrap_or_else(|_| Err("the node stopped".into()))
+    }
+
+    pub async fn forget_profile(&self, name: String) -> bool {
+        let (tx, rx) = oneshot::channel();
+        let _ = self
+            .inner
+            .input
+            .send(Input::ForgetProfile { name, reply: tx });
+        rx.await.unwrap_or(false)
+    }
+
+    fn is_left(&self) -> bool {
+        self.inner.left.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn announce(&self, state: AdState) {
+        let Some(d) = &self.inner.discovery else {
+            return;
+        };
+        let mut ad = self
+            .inner
+            .advertisement
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(ad) = ad.as_mut() {
+            ad.state = state;
+            if let Err(e) = d.advertise(ad) {
+                debug!("cannot update the announcement: {e}");
+            }
+        }
+    }
+
+    /// Dials every paired device again (after rejoining the group).
+    fn redial_all(&self) {
+        let known: Vec<(DeviceId, SocketAddr)> = {
+            let dials = self.inner.dials.lock().unwrap_or_else(|p| p.into_inner());
+            dials.iter().map(|(p, (a, _))| (*p, *a)).collect()
+        };
+        for peer in self.inner.trust.all() {
+            let addr = known
+                .iter()
+                .find(|(p, _)| *p == peer.id)
+                .map(|(_, a)| *a)
+                .or_else(|| peer.addrs.first().copied());
+            if let Some(addr) = addr {
+                self.dial(addr, peer.id);
+            }
+        }
     }
 
     /// Keeps a connection to `peer` at `addr`, redialling with backoff while it is lost.
@@ -572,6 +678,9 @@ impl NodeHandle {
 async fn accept_loop(node: NodeHandle) {
     while let Some(result) = node.inner.transport.accept().await {
         match result {
+            Ok(conn) if node.is_left() => {
+                conn.close(CloseCode::LEAVING, "this device left the group");
+            }
             Ok(conn) if conn.kind() == bridge_core::ConnectionKind::Bulk => {
                 tokio::spawn(node.inner.bulk.clone().serve(conn));
             }
@@ -641,7 +750,7 @@ async fn dial_loop(node: NodeHandle, addr: SocketAddr, peer: DeviceId) {
         {
             return;
         }
-        if node.inner.input.is_closed() {
+        if node.inner.input.is_closed() || node.is_left() {
             return;
         }
         let started = Instant::now();
@@ -696,6 +805,8 @@ fn permanent(info: &CloseInfo) -> Option<String> {
     match info.code {
         Some(CloseCode::NOT_PAIRED) => Some("the peer does not trust this device".into()),
         Some(CloseCode::REVOKED) => Some("the pairing was revoked".into()),
+        // It dials us when it rejoins (or mDNS announces it again).
+        Some(CloseCode::LEAVING) => Some("the device left the group".into()),
         Some(CloseCode::INCOMPATIBLE_VERSION) => {
             Some(format!("incompatible version: {}", info.reason))
         }
@@ -878,6 +989,18 @@ enum Input {
         event: Box<dyn std::any::Any + Send>,
     },
     SetScreens(Vec<bridge_core::LocalScreen>),
+    State(StateCommand),
+    Network(Option<NetworkFingerprint>),
+    Profiles(oneshot::Sender<(Vec<NetworkProfile>, Option<String>)>),
+    SaveProfile {
+        name: String,
+        auto_join: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ForgetProfile {
+        name: String,
+        reply: oneshot::Sender<bool>,
+    },
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -896,6 +1019,9 @@ struct Driver {
     connected: watch::Sender<HashSet<DeviceId>>,
     status: Arc<Mutex<NodeStatus>>,
     trust: Arc<TrustStore>,
+    machine: DeviceStateMachine,
+    profiles_path: Option<std::path::PathBuf>,
+    node: std::sync::Weak<Inner>,
 }
 
 impl Driver {
@@ -909,7 +1035,8 @@ impl Driver {
                 .core
                 .next_deadline()
                 .map(|d| self.start + d.as_duration())
-                .unwrap_or_else(|| Instant::now() + Duration::from_millis(250));
+                .unwrap_or_else(|| Instant::now() + Duration::from_millis(250))
+                .min(Instant::now() + Duration::from_millis(500));
             tokio::select! {
                 msg = rx.recv() => {
                     let Some(msg) = msg else { return };
@@ -924,6 +1051,10 @@ impl Driver {
                     let now = self.now();
                     self.core.handle_tick(now);
                 }
+            }
+            let now = self.now();
+            if let Some((state, reason)) = self.machine.tick(now) {
+                self.apply_state(now, state, reason);
             }
             self.execute();
             self.sync_pairing_window();
@@ -997,6 +1128,38 @@ impl Driver {
                 {
                     let _ = tx.send(info);
                 }
+            }
+            Input::State(cmd) => {
+                if let Some((state, reason)) = self.machine.command(cmd) {
+                    self.apply_state(now, state, reason);
+                }
+            }
+            Input::Network(fp) => self.machine.network_seen(now, fp),
+            Input::Profiles(reply) => {
+                let current = self.machine.current_profile().map(|p| p.name.clone());
+                let _ = reply.send((self.machine.profiles().to_vec(), current));
+            }
+            Input::SaveProfile {
+                name,
+                auto_join,
+                reply,
+            } => {
+                let r = self
+                    .machine
+                    .save_profile(&name, auto_join)
+                    .map(|_| ())
+                    .map_err(str::to_owned);
+                if r.is_ok() {
+                    self.save_profiles();
+                }
+                let _ = reply.send(r);
+            }
+            Input::ForgetProfile { name, reply } => {
+                let ok = self.machine.forget_profile(&name);
+                if ok {
+                    self.save_profiles();
+                }
+                let _ = reply.send(ok);
             }
             Input::Revoke(peer) => self.core.revoke(&peer),
             Input::SetGrants(peer, granted) => self.core.set_grants(&peer, granted),
@@ -1139,6 +1302,56 @@ impl Driver {
         let _ = writer.send(WriterMsg::Frame(frame));
     }
 
+    fn apply_state(&mut self, now: Micros, state: DeviceState, reason: StateReason) {
+        info!(?state, reason = reason.0, "device state");
+        let was_left = self.core.local_state() == DeviceState::Left;
+        self.core.set_local_state(now, state, reason);
+        self.status.lock().unwrap_or_else(|p| p.into_inner()).state = state;
+        let Some(inner) = self.node.upgrade() else {
+            return;
+        };
+        let node = NodeHandle { inner };
+        match state {
+            DeviceState::Left => {
+                node.inner
+                    .left
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // The status message goes first; the connections close right after it.
+                for conn in self.conns.keys().copied().collect::<Vec<_>>() {
+                    self.core.close(conn, CloseCode::LEAVING, "left the group");
+                }
+                node.announce(AdState::Left);
+            }
+            DeviceState::Paused => node.announce(AdState::Paused),
+            DeviceState::Connected => {
+                node.inner
+                    .left
+                    .store(false, std::sync::atomic::Ordering::Release);
+                node.announce(AdState::Connected);
+                if was_left {
+                    node.redial_all();
+                }
+            }
+        }
+        self.status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .network_profile = self.machine.current_profile().map(|p| p.name.clone());
+    }
+
+    fn save_profiles(&self) {
+        let Some(path) = &self.profiles_path else {
+            return;
+        };
+        if let Err(e) = crate::profiles::save(path, self.machine.profiles()) {
+            warn!("cannot save network profiles: {e}");
+        }
+        self.status
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .network_profile = self.machine.current_profile().map(|p| p.name.clone());
+    }
+
     fn refresh_status(&mut self) {
         let peers: Vec<PeerInfo> = self.core.peers();
         let set: HashSet<DeviceId> = peers.iter().map(|p| p.id).collect();
@@ -1156,6 +1369,10 @@ impl Driver {
                     app_version: p.app_version,
                     rtt_us: clock.map(|c| c.min_rtt),
                     clock_offset_us: clock.map(|c| c.offset),
+                    state: self
+                        .core
+                        .peer_state(&p.id)
+                        .unwrap_or(DeviceState::Connected),
                 }
             })
             .collect();

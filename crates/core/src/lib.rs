@@ -11,6 +11,7 @@ pub mod midi;
 mod node;
 pub mod pairing;
 mod scheduler;
+pub mod state;
 mod time;
 
 pub use layout::LocalScreen;
@@ -26,5 +27,3 @@ pub use node::{
 };
 pub use scheduler::{ChannelPlan, ChannelScheduler, ConnectionKind};
 pub use time::Micros;
-
-// TODO(M8): device state machine and network profiles.

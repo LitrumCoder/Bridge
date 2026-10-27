@@ -5,6 +5,7 @@ mod clipboard;
 mod dnd;
 mod inject;
 mod midi;
+mod network;
 mod screens;
 
 use std::sync::Arc;
@@ -14,6 +15,7 @@ pub use clipboard::WinClipboard;
 pub use dnd::{WinDragSource, WinDropTarget};
 pub use inject::WinInjector;
 pub use midi::WinMidi;
+pub(crate) use network::current_network;
 pub use screens::WinScreens;
 
 use crate::{Platform, PlatformError};

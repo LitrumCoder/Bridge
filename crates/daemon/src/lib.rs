@@ -4,15 +4,18 @@
 mod bulk;
 mod node;
 mod pairing_uri;
+pub mod profiles;
 mod trust;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bridge_core::PairingSecret;
+use bridge_core::state::StateCommand;
 use bridge_feature_files::{Direction, FilesHandle, TransferState, TransferStatus};
 use bridge_ipc::{
-    DeviceEntry, IpcHandler, NearbyEntry, PairTarget, Request, Response, TransferEntry,
+    DeviceEntry, IpcHandler, NearbyEntry, PairTarget, ProfileEntry, Request, Response,
+    TransferEntry,
 };
 use bridge_protocol::{DeviceId, PermissionId};
 use bridge_transport::ExpectedPeer;
@@ -175,11 +178,47 @@ async fn handle_request(
             node.set_permissions(id, granted.into_iter().map(PermissionId).collect());
             Response::Ok
         }
+        Request::Pause => state(node, StateCommand::Pause),
+        Request::Resume => state(node, StateCommand::Resume),
+        Request::Leave => state(node, StateCommand::Leave),
+        Request::Rejoin => state(node, StateCommand::Rejoin),
+        Request::Profiles => {
+            let (profiles, current) = node.profiles().await;
+            Response::Profiles(
+                profiles
+                    .into_iter()
+                    .map(|p| ProfileEntry {
+                        current: current.as_deref() == Some(p.name.as_str()),
+                        networks: p.fingerprints.len() as u32,
+                        auto_join: p.auto_join,
+                        name: p.name,
+                    })
+                    .collect(),
+            )
+        }
+        Request::SaveProfile { name, auto_join } => {
+            match node.save_profile(name, auto_join).await {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::ForgetProfile { name } => {
+            if node.forget_profile(name.clone()).await {
+                Response::Ok
+            } else {
+                Response::Error(format!("no profile {name}"))
+            }
+        }
         Request::Shutdown => {
             shutdown.notify_one();
             Response::Ok
         }
     }
+}
+
+fn state(node: &NodeHandle, cmd: StateCommand) -> Response {
+    node.set_state(cmd);
+    Response::Ok
 }
 
 async fn pair(node: &NodeHandle, target: PairTarget, code: &str) -> Response {

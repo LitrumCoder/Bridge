@@ -98,7 +98,13 @@ async fn run(args: Args) -> Result<(), String> {
     let name = args.name.unwrap_or_else(host_name);
     let transport =
         bind_transport(args.listen, identity, trust.clone()).map_err(|e| e.to_string())?;
-    let mut builder = NodeBuilder::new(name.clone(), trust).hide_name(args.hide_name);
+    let profiles_path = data_dir.join("profiles.toml");
+    let mut builder = NodeBuilder::new(name.clone(), trust)
+        .hide_name(args.hide_name)
+        .profiles(
+            bridge_daemon::profiles::load(&profiles_path),
+            Some(profiles_path),
+        );
     let mut services = Services::default();
     let mut files = None;
     if !args.no_files {
@@ -218,6 +224,28 @@ async fn run(args: Args) -> Result<(), String> {
                     node.set_screens(now.clone());
                     last = now;
                 }
+            }
+        });
+    }
+
+    {
+        // ADR-0016: the network fingerprint, for leaving and rejoining with profiles.
+        let node = node.clone();
+        tokio::spawn(async move {
+            loop {
+                let fp = tokio::task::spawn_blocking(|| {
+                    bridge_platform::network::current_network().map(|n| {
+                        let d = ring::digest::digest(&ring::digest::SHA256, &n.identity_bytes());
+                        let mut fp = [0u8; 32];
+                        fp.copy_from_slice(d.as_ref());
+                        fp
+                    })
+                })
+                .await
+                .ok()
+                .flatten();
+                node.network_seen(fp);
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
         });
     }
