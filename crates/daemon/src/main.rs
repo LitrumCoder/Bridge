@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use bridge_core::input::RouterEvent;
 use bridge_daemon::{NodeBuilder, Services, TrustStore, bind_transport, ipc_handler};
 use bridge_discovery::MdnsDiscovery;
 use bridge_feature_clipboard::{ClipboardConfig, ClipboardFeature};
-use bridge_feature_files::{FilesConfig, FilesFeature};
+use bridge_feature_files::{CursorEvent, DragWiring, FilesConfig, FilesFeature};
 use bridge_feature_input::{InputConfig, InputFeature, Wake};
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
@@ -94,19 +95,48 @@ async fn run(args: Args) -> Result<(), String> {
     let transport =
         bind_transport(args.listen, identity, trust.clone()).map_err(|e| e.to_string())?;
     let mut builder = NodeBuilder::new(name.clone(), trust).hide_name(args.hide_name);
+    let mut services = Services::default();
+    let mut files = None;
+    if !args.no_files {
+        let post = builder
+            .local_sender(bridge_protocol::FeatureId::FILES)
+            .into_post();
+        let (link, incoming) = builder.bulk();
+        let downloads = args
+            .download_dir
+            .clone()
+            .or_else(|| {
+                directories::UserDirs::new()
+                    .and_then(|u| u.download_dir().map(|d| d.join("Bridge")))
+            })
+            .unwrap_or_else(|| data_dir.join("received"));
+        let mut config = FilesConfig::new(downloads);
+        config.staging_dir = data_dir.join("staging");
+        let (feature, handle) = FilesFeature::new(config, link, incoming, post);
+        services.files = Some(handle);
+        files = Some(feature);
+    }
     let mut screens_source = None;
     if !args.no_input {
         match bridge_platform::native() {
             Ok(platform) => {
                 let local = builder.local_sender(bridge_protocol::FeatureId::INPUT);
                 let screens = platform.screens.clone();
-                let feature = InputFeature::new(
+                let mut feature = InputFeature::new(
                     id,
                     platform,
                     InputConfig::default(),
                     Arc::new(move || local.post(Wake)),
                 )
                 .map_err(|e| format!("input: {e}"))?;
+                if let (Some(f), Some(handle)) = (files.take(), services.files.clone()) {
+                    files = Some(with_drag(f, &feature));
+                    feature = feature.on_router_event(Arc::new(move |e| match e {
+                        RouterEvent::Entered { peer } => handle.cursor(CursorEvent::Entered(*peer)),
+                        RouterEvent::Returned { .. } => handle.cursor(CursorEvent::Returned),
+                        _ => {}
+                    }));
+                }
                 builder = builder
                     .screens(screens.screens())
                     .feature(feature)
@@ -115,6 +145,9 @@ async fn run(args: Args) -> Result<(), String> {
             }
             Err(e) => warn!("mouse and keyboard sharing is unavailable: {e}"),
         }
+    }
+    if let Some(f) = files {
+        builder = builder.feature(f).map_err(|e| e.to_string())?;
     }
     if !args.no_clipboard {
         match bridge_platform::native_clipboard() {
@@ -129,25 +162,6 @@ async fn run(args: Args) -> Result<(), String> {
             }
             Err(e) => warn!("clipboard sharing is unavailable: {e}"),
         }
-    }
-    let mut services = Services::default();
-    if !args.no_files {
-        let post = builder
-            .local_sender(bridge_protocol::FeatureId::FILES)
-            .into_post();
-        let (link, incoming) = builder.bulk();
-        let downloads = args
-            .download_dir
-            .clone()
-            .or_else(|| {
-                directories::UserDirs::new()
-                    .and_then(|u| u.download_dir().map(|d| d.join("Bridge")))
-            })
-            .unwrap_or_else(|| data_dir.join("received"));
-        let (feature, handle) =
-            FilesFeature::new(FilesConfig::new(downloads), link, incoming, post);
-        builder = builder.feature(feature).map_err(|e| e.to_string())?;
-        services.files = Some(handle);
     }
     if !args.no_mdns {
         match MdnsDiscovery::start(id) {
@@ -201,6 +215,23 @@ async fn run(args: Args) -> Result<(), String> {
     }
     node.shutdown().await;
     Ok(())
+}
+
+/// Dragging files across edges needs both the OS drag services and the input router.
+fn with_drag(files: FilesFeature, input: &InputFeature) -> FilesFeature {
+    let control = input.control();
+    let set_drag_active = Arc::new(move |on| control.set_drag_active(on));
+    match bridge_platform::native_drag() {
+        Ok((source, target)) => files.with_drag(DragWiring {
+            source,
+            target: Some(target),
+            set_drag_active,
+        }),
+        Err(e) => {
+            warn!("dragging files across devices is unavailable: {e}; dropped files are saved");
+            files
+        }
+    }
 }
 
 fn host_name() -> String {

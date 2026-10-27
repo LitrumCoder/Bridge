@@ -210,6 +210,63 @@ fn held_button_blocks_crossing_unless_dragging_files() {
 }
 
 #[test]
+fn a_file_drag_hands_the_button_over_and_drops_on_both_sides() {
+    let mut r = router();
+    let t = Micros(1);
+    let left = |down| CaptureEvent::Button {
+        button: MouseButton::Left,
+        down,
+    };
+    assert_eq!(r.on_event(t, left(true)), Decision::Pass);
+    r.set_drag_active(true);
+    let acts = cross_to_b(&mut r, t);
+    let msgs = sent_to(&acts, B);
+    assert!(
+        msgs.iter().any(
+            |m| matches!(m, InputMessage::Button(b) if b.down && b.button == MouseButton::Left)
+        ),
+        "B gets the button down so its OS can run the drag: {msgs:?}"
+    );
+    // Pushing back towards A does not leave B before the drop.
+    for _ in 0..10 {
+        r.on_event(
+            t,
+            CaptureEvent::Motion {
+                x: 0,
+                y: 0,
+                dx: -500,
+                dy: 0,
+            },
+        );
+    }
+    assert_eq!(r.current_peer(), Some(B));
+    drain(&mut r, t);
+    assert_eq!(
+        r.on_event(t, left(false)),
+        Decision::Pass,
+        "the local drag loop ends too (in Bridge's own window)"
+    );
+    let msgs = sent_to(&drain(&mut r, t), B);
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, InputMessage::Button(b) if !b.down)),
+        "and B drops: {msgs:?}"
+    );
+    // After the drop the cursor moves freely again.
+    r.set_drag_active(false);
+    r.on_event(
+        t,
+        CaptureEvent::Motion {
+            x: 0,
+            y: 0,
+            dx: -3000,
+            dy: 0,
+        },
+    );
+    assert_eq!(r.current_peer(), None);
+}
+
+#[test]
 fn peer_disappearing_returns_control_home() {
     let mut r = router();
     let t = Micros(1);

@@ -118,6 +118,9 @@ pub struct InputRouter {
     locks: LockState,
     layout_tag: Option<LayoutTag>,
     drag_active: bool,
+    /// A file drag crossed to this peer: the button pressed here is held there too,
+    /// and its release goes to both (ADR-0008).
+    dragging: Option<DeviceId>,
     last_drain: Micros,
 }
 
@@ -138,6 +141,7 @@ impl InputRouter {
             locks: LockState::default(),
             layout_tag: None,
             drag_active: false,
+            dragging: None,
             last_drain: Micros::ZERO,
         }
     }
@@ -312,6 +316,25 @@ impl InputRouter {
                 Some(d) => d,
             }
         };
+        if !down
+            && button == MouseButton::Left
+            && dest == Dest::Local
+            && let Some(p) = self.dragging.take()
+        {
+            // The drop happens over there; the local drag loop ends here too, in our
+            // own window, where it does nothing.
+            if self.available.contains(&p) {
+                self.send(
+                    p,
+                    Button {
+                        button,
+                        down: false,
+                    }
+                    .into(),
+                );
+            }
+            return Decision::Pass;
+        }
         match dest {
             Dest::Local => Decision::Pass,
             Dest::Dropped => Decision::Swallow,
@@ -353,6 +376,20 @@ impl InputRouter {
                 Decision::Swallow
             }
             Target::Remote { peer, pos } => {
+                if self.dragging == Some(peer) {
+                    // Files are on their way to this peer: the cursor stays until the drop.
+                    let only = |d: &DeviceId| *d == peer;
+                    let (sx, sy) = self.scale_to(pos);
+                    let next = self
+                        .layout
+                        .step(pos, f64::from(dx) * sx, f64::from(dy) * sy, &only);
+                    let moved = next.pixel() != pos.pixel() || next.screen != pos.screen;
+                    self.target = Target::Remote { peer, pos: next };
+                    if moved {
+                        self.send_motion(peer, next);
+                    }
+                    return Decision::Swallow;
+                }
                 if self.shake.feed(now, f64::from(dx)) {
                     self.push(RouterAction::Event(RouterEvent::Shake { device: peer }));
                 }
@@ -435,10 +472,24 @@ impl InputRouter {
         };
         self.send(peer, enter.into());
         self.send_motion(peer, pos);
+        if self.drag_active && self.keys.button_dest(MouseButton::Left) == Some(Dest::Local) {
+            self.send(
+                peer,
+                Button {
+                    button: MouseButton::Left,
+                    down: true,
+                }
+                .into(),
+            );
+            self.dragging = Some(peer);
+        }
         self.push(RouterAction::Event(RouterEvent::Entered { peer }));
     }
 
     fn leave_peer(&mut self, peer: DeviceId) {
+        if self.dragging == Some(peer) {
+            self.dragging = None;
+        }
         self.send(peer, ReleaseAll.into());
         self.send(peer, Leave.into());
         self.keys.drop_peer(peer);

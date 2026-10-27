@@ -154,6 +154,20 @@ pub struct Finished {
     pub ok: bool,
 }
 
+/// Files dragged across the screen edge (ADR-0008): like `Offer`, but the receiver
+/// stages them and starts an OS drag under the cursor right away.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DragOffer {
+    pub offer: Offer,
+}
+
+/// How the drag ended on the receiver; the sender then ends its local drag loop.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct DragResult {
+    pub transfer: TransferId,
+    pub dropped: bool,
+}
+
 define_messages! {
     pub enum FilesMessage for FeatureId::FILES {
         1 => Offer,
@@ -164,6 +178,8 @@ define_messages! {
         6 => Restart,
         7 => Cancel,
         8 => Finished,
+        9 => DragOffer,
+        10 => DragResult,
     }
 }
 
@@ -208,6 +224,13 @@ impl Validate for ItemDone {}
 impl Validate for Restart {}
 impl Validate for Cancel {}
 impl Validate for Finished {}
+impl Validate for DragResult {}
+
+impl Validate for DragOffer {
+    fn validate(&self) -> Result<(), DecodeError> {
+        self.offer.validate()
+    }
+}
 
 #[cfg(test)]
 mod tests {

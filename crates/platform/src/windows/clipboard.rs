@@ -128,7 +128,8 @@ fn hwnd() -> HWND {
 
 /// Opens the clipboard, retrying while another application holds it.
 fn open(owner: HWND) -> bool {
-    for _ in 0..20 {
+    // Clipboard monitors hold it for a moment after every change.
+    for _ in 0..100 {
         // SAFETY: plain Win32 call.
         if unsafe { OpenClipboard(owner) } != 0 {
             return true;
@@ -436,7 +437,7 @@ impl Clipboard for WinClipboard {
             Some((formats.to_vec(), provider, tx));
         // SAFETY: posting to our own window.
         unsafe { PostMessageW(h, WM_ANNOUNCE, 0, 0) };
-        match rx.recv_timeout(Duration::from_secs(2)) {
+        match rx.recv_timeout(Duration::from_secs(3)) {
             Ok(true) => Ok(()),
             _ => Err(PlatformError::Os("cannot take the clipboard".into())),
         }

@@ -49,7 +49,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: xvfb-run -a env BRIDGE_X11_TESTS=1 cargo test --locked -p bridge-platform --features mock --test x11_native -- --nocapture
+      - run: xvfb-run -a env BRIDGE_X11_TESTS=1 cargo test --locked -p bridge-platform --features mock --test x11_native -- --test-threads=1 --nocapture
 
   platform-windows:
     name: Windows hooks and SendInput

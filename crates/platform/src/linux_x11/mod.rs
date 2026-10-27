@@ -3,6 +3,7 @@
 
 mod capture;
 mod clipboard;
+mod dnd;
 mod inject;
 
 use std::sync::Arc;
@@ -15,6 +16,7 @@ use x11rb::rust_connection::RustConnection;
 
 pub use capture::X11Capture;
 pub use clipboard::X11Clipboard;
+pub use dnd::{XdndSource, XdndTarget};
 pub use inject::X11Injector;
 
 use crate::{LocalScreen, Platform, PlatformError, ScreenInfo};

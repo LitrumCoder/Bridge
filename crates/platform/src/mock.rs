@@ -9,7 +9,8 @@ use tokio::sync::Notify;
 
 use crate::{
     CaptureEvent, CaptureSink, ClipChange, ClipFormat, Clipboard, ClipboardProvider, ClipboardSink,
-    Decision, InputCapture, InputInjector, LocalScreen, Platform, PlatformError, ScreenInfo,
+    Decision, DragSink, DragSource, DropItem, DropProgress, DropSink, DropTarget, InputCapture,
+    InputInjector, LocalScreen, Platform, PlatformError, ScreenInfo,
 };
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -319,12 +320,113 @@ impl Clipboard for MockClipboard {
     }
 }
 
+/// The test plays the user dragging files to an edge.
+#[derive(Default)]
+pub struct MockDragSource {
+    sink: Mutex<Option<Arc<dyn DragSink>>>,
+    holds: Mutex<u32>,
+    finishes: Mutex<u32>,
+}
+
+impl MockDragSource {
+    pub fn drag_to_edge(&self, paths: &[std::path::PathBuf]) {
+        if let Some(s) = lock(&self.sink).clone() {
+            s.drag_entered(paths.to_vec());
+        }
+    }
+
+    pub fn drag_away(&self) {
+        if let Some(s) = lock(&self.sink).clone() {
+            s.drag_left();
+        }
+    }
+
+    pub fn holds(&self) -> u32 {
+        *lock(&self.holds)
+    }
+
+    pub fn finishes(&self) -> u32 {
+        *lock(&self.finishes)
+    }
+}
+
+impl DragSource for MockDragSource {
+    fn start(&self, sink: Arc<dyn DragSink>) -> Result<(), PlatformError> {
+        *lock(&self.sink) = Some(sink);
+        Ok(())
+    }
+    fn hold(&self) {
+        *lock(&self.holds) += 1;
+    }
+    fn finish(&self) {
+        *lock(&self.finishes) += 1;
+    }
+    fn stop(&self) {
+        *lock(&self.sink) = None;
+    }
+}
+
+type Session = (Vec<DropItem>, Arc<dyn DropProgress>, Arc<dyn DropSink>);
+
+/// Records OS drag sessions; the test drops or cancels them.
+#[derive(Default)]
+pub struct MockDropTarget {
+    sessions: Mutex<Vec<Session>>,
+    changed: Notify,
+}
+
+impl MockDropTarget {
+    pub fn sessions(&self) -> Vec<Vec<DropItem>> {
+        lock(&self.sessions).iter().map(|s| s.0.clone()).collect()
+    }
+
+    pub async fn wait_session(&self, timeout: std::time::Duration) -> Option<Vec<DropItem>> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.changed.notified();
+                if let Some(s) = lock(&self.sessions).last() {
+                    return s.0.clone();
+                }
+                notified.await;
+            }
+        })
+        .await
+        .ok()
+    }
+
+    /// The target application takes the drop, reading the files as a real one
+    /// would: it waits until they are complete. Blocks.
+    pub fn drop_and_wait(&self, accepted: bool, timeout: std::time::Duration) -> bool {
+        let Some((_, progress, sink)) = lock(&self.sessions).last().cloned() else {
+            return false;
+        };
+        let complete = !accepted || progress.wait_complete(timeout);
+        sink.dropped(accepted);
+        complete
+    }
+}
+
+impl DropTarget for MockDropTarget {
+    fn begin(
+        &self,
+        items: Vec<DropItem>,
+        progress: Arc<dyn DropProgress>,
+        sink: Arc<dyn DropSink>,
+    ) -> Result<(), PlatformError> {
+        lock(&self.sessions).push((items, progress, sink));
+        self.changed.notify_waiters();
+        Ok(())
+    }
+}
+
 /// A full mock platform plus typed handles to drive and inspect it.
 pub struct MockPlatform {
     pub capture: Arc<MockCapture>,
     pub injector: Arc<MockInjector>,
     pub screens: Arc<MockScreens>,
     pub clipboard: Arc<MockClipboard>,
+    pub drag_source: Arc<MockDragSource>,
+    pub drop_target: Arc<MockDropTarget>,
 }
 
 impl MockPlatform {
@@ -334,6 +436,8 @@ impl MockPlatform {
             injector: Arc::new(MockInjector::default()),
             screens: Arc::new(MockScreens::single_hd()),
             clipboard: Arc::new(MockClipboard::default()),
+            drag_source: Arc::new(MockDragSource::default()),
+            drop_target: Arc::new(MockDropTarget::default()),
         }
     }
 

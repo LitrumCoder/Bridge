@@ -25,12 +25,7 @@ fn start(spec: NodeSpec, name: &str, config: FilesConfig) -> (TestNode, FilesHan
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
         .try_init();
-    // Coarse Windows timers would look like queuing delay to the bulk controller.
-    #[cfg(windows)]
-    // SAFETY: plain call; the period is restored when the process exits.
-    unsafe {
-        windows_sys::Win32::Media::timeBeginPeriod(1);
-    }
+    bridge_testkit::fine_timers();
     let mut handle = None;
     let node = spec.start(name, |b| {
         let post = b.local_sender(FeatureId::FILES).into_post();

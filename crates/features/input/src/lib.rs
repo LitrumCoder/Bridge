@@ -43,6 +43,20 @@ pub struct Wake;
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
+/// Receives router events (entered a device, returned, …) on the node thread.
+pub type RouterListener = Arc<dyn Fn(&RouterEvent) + Send + Sync>;
+
+/// Lets other features steer the router without owning it.
+#[derive(Clone)]
+pub struct InputControl(Arc<Shared>);
+
+impl InputControl {
+    /// A file drag is in progress: crossing with the button held hands it over.
+    pub fn set_drag_active(&self, active: bool) {
+        self.0.router().set_drag_active(active);
+    }
+}
+
 struct Shared {
     router: Mutex<InputRouter>,
     epoch: Instant,
@@ -84,6 +98,7 @@ pub struct InputFeature {
     my_platform: bridge_protocol::Platform,
     config: InputConfig,
     last_event: Option<RouterEvent>,
+    listener: Option<RouterListener>,
 }
 
 impl InputFeature {
@@ -113,7 +128,17 @@ impl InputFeature {
             my_platform: bridge_protocol::Platform::current(),
             config,
             last_event: None,
+            listener: None,
         })
+    }
+
+    pub fn control(&self) -> InputControl {
+        InputControl(self.shared.clone())
+    }
+
+    pub fn on_router_event(mut self, listener: RouterListener) -> Self {
+        self.listener = Some(listener);
+        self
     }
 
     /// Last router event (entered a device, returned, locked, shake), for the UI.
@@ -180,6 +205,9 @@ impl InputFeature {
                 RouterAction::Warp { x, y } => self.platform.capture.warp(x, y),
                 RouterAction::Event(e) => {
                     debug!(?e, "input router");
+                    if let Some(l) = &self.listener {
+                        l(&e);
+                    }
                     // TODO(M9): edge glow and shake locator overlays, drawn by the UI process.
                     self.last_event = Some(e);
                 }

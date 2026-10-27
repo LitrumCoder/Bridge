@@ -32,6 +32,7 @@
 | 4b | `dbc4455` | Windows (LL-хуки + SendInput) и X11 (XInput2 + XTest + RandR), ввод включён в `bridged` |
 | 4c | `3d51159`, `a214883` | macOS (CGEventTap + CGEventPost, онбординг Accessibility; только `clippy --target aarch64-apple-darwin`), Wayland (InputCapture + RemoteDesktop + EIS через `ashpd`/`reis`; на композиторе не проверено) |
 | 5 | `6500bbd` | буфер обмена: протокол, фича с ленивой выдачей, Windows и X11 с нативными тестами; macOS и чистый Wayland — `Unsupported` |
+| 6a | `21d30ed` | движок файлов (докачка, BLAKE3, конфликты, отмена), bulk-соединение с LEDBAT, `bridge send/transfers/cancel` |
 
 Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92%.
 

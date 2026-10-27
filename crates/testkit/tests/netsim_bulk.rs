@@ -176,13 +176,7 @@ async fn run(kind: ConnectionKind, total: u64, seed: u64) -> Run {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn file_traffic_does_not_queue_in_front_of_input() {
-    // The simulator delivers packets on tokio timers; Windows ticks every 15.6 ms
-    // unless asked otherwise, which would look like queuing delay.
-    #[cfg(windows)]
-    // SAFETY: plain call; the period is restored when the process exits.
-    unsafe {
-        windows_sys::Win32::Media::timeBeginPeriod(1);
-    }
+    bridge_testkit::fine_timers();
     let long = std::env::var_os("BRIDGE_LONG_TESTS").is_some();
     let total = if long { 2 << 30 } else { 24 << 20 };
     let ledbat = run(ConnectionKind::Bulk, total, 11).await;

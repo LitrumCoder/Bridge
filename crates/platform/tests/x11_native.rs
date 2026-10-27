@@ -192,3 +192,85 @@ fn clipboard_ownership_targets_and_incr() {
     owner.stop();
     watcher.stop();
 }
+
+struct DragRec(Mutex<Vec<Vec<std::path::PathBuf>>>);
+
+impl bridge_platform::DragSink for DragRec {
+    fn drag_entered(&self, paths: Vec<std::path::PathBuf>) {
+        self.0.lock().unwrap().push(paths);
+    }
+    fn drag_left(&self) {}
+}
+
+struct Ready;
+
+impl bridge_platform::DropProgress for Ready {
+    fn wait_complete(&self, _timeout: Duration) -> bool {
+        true
+    }
+}
+
+struct DropRec(Mutex<Option<bool>>);
+
+impl bridge_platform::DropSink for DropRec {
+    fn dropped(&self, accepted: bool) {
+        *self.0.lock().unwrap() = Some(accepted);
+    }
+}
+
+/// Both XDND roles on one display: our drag session (the receiving side of a
+/// cross-device drag) talks to our edge strips (the sending side), which read the
+/// file list and then refuse the local drop, as they must.
+#[test]
+fn xdnd_drag_session_reaches_the_edge_strips() {
+    use bridge_platform::linux_x11::{XdndSource, XdndTarget};
+    use bridge_platform::{DragSource, DropItem, DropTarget};
+    use bridge_protocol::input::MouseButton;
+    if !enabled() {
+        eprintln!("skipped: set BRIDGE_X11_TESTS=1 and DISPLAY");
+        return;
+    }
+    let screens = Arc::new(X11Screens::new().unwrap());
+    let s = screens.screens()[0];
+    let injector = X11Injector::new(screens.clone()).unwrap();
+    let rec = Arc::new(DragRec(Mutex::new(Vec::new())));
+    let edges = XdndSource::new().unwrap();
+    edges.start(rec.clone()).unwrap();
+    injector.move_abs(s.id, s.px_w as i32 - 1, 300).unwrap();
+    injector.button(MouseButton::Left, true).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let staged = std::path::PathBuf::from("/tmp/bridge xdnd/файл.txt");
+    let dropped = Arc::new(DropRec(Mutex::new(None)));
+    XdndTarget::new()
+        .unwrap()
+        .begin(
+            vec![DropItem {
+                path: staged.clone(),
+                is_dir: false,
+            }],
+            Arc::new(Ready),
+            dropped.clone(),
+        )
+        .unwrap();
+    let start = Instant::now();
+    while rec.0.lock().unwrap().is_empty() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    injector.button(MouseButton::Left, false).unwrap();
+    assert_eq!(
+        rec.0.lock().unwrap().first(),
+        Some(&vec![staged]),
+        "the strip read the uri-list"
+    );
+    let start = Instant::now();
+    while dropped.0.lock().unwrap().is_none() && start.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        *dropped.0.lock().unwrap(),
+        Some(false),
+        "the edge refuses the local drop"
+    );
+    edges.stop();
+}

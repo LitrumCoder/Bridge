@@ -43,6 +43,10 @@ impl KeyTracker {
         self.buttons.remove(&b)
     }
 
+    pub(crate) fn button_dest(&self, b: MouseButton) -> Option<Dest> {
+        self.buttons.get(&b).copied()
+    }
+
     pub(crate) fn any_button(&self) -> bool {
         !self.buttons.is_empty()
     }

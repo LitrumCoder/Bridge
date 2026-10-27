@@ -53,9 +53,11 @@
 | 4b | готово (см. git log): Windows (LL-хуки, `SendInput`, мониторы с DPI, раскладка, lock-клавиши), X11 (XInput2 raw, grab, XTest, RandR), таблицы HID ↔ set 1 / evdev, `bridged` включает ввод сам; нативные тесты: Windows (`BRIDGE_PLATFORM_TESTS=1`), X11 под Xvfb/WSLg. Оверлеи (подсветка края, локатор) перенесены в веху 9 — их рисует UI-процесс |
 | 4c | готово, коммит `a214883`: macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
 | 5 | готово, коммит `6500bbd`: протокол буфера, фича с ленивой выдачей, mock + интеграционные тесты, Windows (отложенный рендеринг, исключение из журнала Win+V) и X11 (владение `CLIPBOARD`, XFixes, INCR) с нативными тестами. macOS и чистый Wayland — `Unsupported` |
-| 6a | готово (хеш — в HANDOFF.md): протокол файлов с валидацией путей, движок (ведёт приёмник, до 4 файлов параллельно, докачка по `.bridgepart` + sidecar, BLAKE3, `Restart` при изменении источника, отмена, mtime, конфликты `имя (1)`), bulk-соединение с LEDBAT-контроллером, `bridge send/transfers/cancel`; интеграционные тесты на netsim и тест p99 ввода под нагрузкой (24 МБ; 2 ГБ — `BRIDGE_LONG_TESTS=1`) |
+| 6a | готово, коммит `21d30ed`: протокол файлов с валидацией путей, движок (ведёт приёмник, до 4 файлов параллельно, докачка по `.bridgepart` + sidecar, BLAKE3, `Restart` при изменении источника, отмена, mtime, конфликты `имя (1)`), bulk-соединение с LEDBAT-контроллером, `bridge send/transfers/cancel`; интеграционные тесты на netsim и тест p99 ввода под нагрузкой (24 МБ; 2 ГБ — `BRIDGE_LONG_TESTS=1`) |
+| 6b | готово (хеш — в HANDOFF.md): роутер передаёт зажатую кнопку при перетаскивании файлов, `DragOffer`/`DragResult`, staging с ожиданием завершения, mock + интеграционный drag (сброс, отмена, «передумал»); Windows OLE (полосы у краёв как drop target, `DoDragDrop` с `CF_HDROP`), X11 XDND обеих ролей с нативным тестом. Spike `DoDragDrop` под `SendInput` и «в окно DAW» — ручные проверки D1–D6; виртуальные файлы Windows — TODO |
 
 ## Перенесено в конец этапа: macOS
+
 
 Владелец попросил закончить всё по macOS в последнюю очередь: у него нет техники Apple, проверить нечем.
 Ввод (веха 4c) уже написан и собирается. Остальное (`TODO(macOS-final)`):

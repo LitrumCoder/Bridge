@@ -2,6 +2,7 @@
 
 mod capture;
 mod clipboard;
+mod dnd;
 mod inject;
 mod screens;
 
@@ -9,6 +10,7 @@ use std::sync::Arc;
 
 pub use capture::WinCapture;
 pub use clipboard::WinClipboard;
+pub use dnd::{WinDragSource, WinDropTarget};
 pub use inject::WinInjector;
 pub use screens::WinScreens;
 

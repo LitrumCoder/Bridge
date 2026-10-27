@@ -18,9 +18,10 @@ use std::time::Duration;
 use bridge_core::{
     Feature, FeatureCx, FeatureError, FeatureInfo, LocalPost, Micros, PeerDownReason, PeerId,
 };
+use bridge_platform::{DragSink, DragSource, DropItem, DropProgress, DropSink, DropTarget};
 use bridge_protocol::files::{
-    BulkHeader, Cancel, Decline, DeclineReason, FilesMessage, Finished, ITEMS_PER_MESSAGE, Item,
-    ItemDone, ItemKind, Items, Offer, Restart, TransferId, Want,
+    BulkHeader, Cancel, Decline, DeclineReason, DragOffer, DragResult, FilesMessage, Finished,
+    ITEMS_PER_MESSAGE, Item, ItemDone, ItemKind, Items, Offer, Restart, TransferId, Want,
 };
 use bridge_protocol::{BoundedVec, ChannelClass, FeatureId, PermissionId};
 use bridge_transport::{BulkIncoming, BulkLink};
@@ -43,6 +44,8 @@ pub struct FilesConfig {
     pub parallel: usize,
     /// A requested file whose stream has not arrived by then is asked for again.
     pub stall: Duration,
+    /// Where dragged files land while the drop target reads them (ADR-0008).
+    pub staging_dir: PathBuf,
 }
 
 impl FilesConfig {
@@ -53,6 +56,7 @@ impl FilesConfig {
             max_bytes: 1 << 40,
             parallel: 4,
             stall: Duration::from_secs(30),
+            staging_dir: std::env::temp_dir().join("bridge-staging"),
         }
     }
 }
@@ -109,6 +113,11 @@ impl FilesHandle {
         rx.await.map_err(|_| "the node stopped".to_owned())?
     }
 
+    /// The input router moved the cursor (wired from the input feature).
+    pub fn cursor(&self, event: CursorEvent) {
+        (self.post)(Box::new(Local::Cursor(event)));
+    }
+
     pub fn cancel(&self, transfer: TransferId) {
         (self.post)(Box::new(Local::Cancel(transfer)));
     }
@@ -161,6 +170,14 @@ enum Local {
         reply: oneshot::Sender<Result<TransferId, String>>,
     },
     Cancel(TransferId),
+    DragEntered(Vec<PathBuf>),
+    DragWalked(Result<Walked, String>),
+    DragLeft,
+    Cursor(CursorEvent),
+    Dropped {
+        transfer: TransferId,
+        accepted: bool,
+    },
     Prepared {
         transfer: TransferId,
         result: Option<Vec<Option<PathBuf>>>,
@@ -198,6 +215,7 @@ struct ItemProgress {
 
 struct In {
     peer: PeerId,
+    drag: bool,
     total: u32,
     bytes: u64,
     items: Vec<Item>,
@@ -221,6 +239,9 @@ pub struct FilesFeature {
     incoming: HashMap<TransferId, In>,
     counter: u64,
     dispatcher: AbortHandle,
+    drag: Option<DragWiring>,
+    pending_drag: Option<Walked>,
+    active_drag: Option<TransferId>,
 }
 
 impl FilesFeature {
@@ -275,6 +296,9 @@ impl FilesFeature {
                 outgoing: HashMap::new(),
                 incoming: HashMap::new(),
                 counter: 0,
+                drag: None,
+                pending_drag: None,
+                active_drag: None,
                 dispatcher,
             },
             handle,
@@ -285,6 +309,31 @@ impl FilesFeature {
         match msg.to_envelope() {
             Ok(env) => cx.send_encoded(peer, env.kind, env.payload),
             Err(e) => warn!("cannot encode a files message: {e}"),
+        }
+    }
+
+    /// Enables dragging files across the edges (ADR-0008).
+    pub fn with_drag(mut self, wiring: DragWiring) -> Self {
+        if let Err(e) = wiring.source.start(Arc::new(DragEvents(self.post.clone()))) {
+            warn!("dragging files out of this device is unavailable: {e}");
+        }
+        clean_staging(&self.config.staging_dir);
+        self.drag = Some(wiring);
+        self
+    }
+
+    fn set_drag_active(&self, active: bool) {
+        if let Some(d) = &self.drag {
+            (d.set_drag_active)(active);
+        }
+    }
+
+    fn end_drag(&mut self) {
+        if self.active_drag.take().is_some() {
+            if let Some(d) = &self.drag {
+                d.source.finish();
+            }
+            self.set_drag_active(false);
         }
     }
 
@@ -323,6 +372,7 @@ impl FilesFeature {
         cx: &mut FeatureCx<'_>,
         peer: PeerId,
         walked: Walked,
+        drag: bool,
     ) -> Result<TransferId, String> {
         let allowed = cx.peer(&peer).is_some_and(|p| p.allows_us);
         if !allowed {
@@ -337,16 +387,17 @@ impl FilesFeature {
         let id = self.new_id(peer, &[]);
         let bytes: u64 = walked.items.iter().map(|i| i.size).sum();
         let total = walked.items.len() as u32;
-        Self::send(
-            cx,
-            peer,
-            Offer {
-                transfer: id,
-                items: total,
-                bytes,
-            }
-            .into(),
-        );
+        let offer = Offer {
+            transfer: id,
+            items: total,
+            bytes,
+        };
+        let msg = if drag {
+            DragOffer { offer }.into()
+        } else {
+            offer.into()
+        };
+        Self::send(cx, peer, msg);
         for (n, chunk) in walked.items.chunks(ITEMS_PER_MESSAGE).enumerate() {
             let Ok(items) = BoundedVec::try_from_vec(chunk.to_vec()) else {
                 continue;
@@ -487,7 +538,7 @@ impl FilesFeature {
         }
     }
 
-    fn on_offer(&mut self, cx: &mut FeatureCx<'_>, peer: PeerId, o: Offer) {
+    fn on_offer(&mut self, cx: &mut FeatureCx<'_>, peer: PeerId, o: Offer, drag: bool) {
         if self.incoming.contains_key(&o.transfer) || self.outgoing.contains_key(&o.transfer) {
             return;
         }
@@ -528,6 +579,7 @@ impl FilesFeature {
             o.transfer,
             In {
                 peer,
+                drag,
                 total: o.items,
                 bytes: o.bytes,
                 items: Vec::new(),
@@ -569,12 +621,12 @@ impl FilesFeature {
         {
             s.names = top_names(&t.items);
         }
-        let (items, base, policy, post) = (
-            t.items.clone(),
-            self.config.download_dir.clone(),
-            self.config.conflict,
-            self.post.clone(),
-        );
+        let base = if t.drag {
+            self.config.staging_dir.join(m.transfer.to_string())
+        } else {
+            self.config.download_dir.clone()
+        };
+        let (items, policy, post) = (t.items.clone(), self.config.conflict, self.post.clone());
         let transfer = m.transfer;
         self.rt.spawn_blocking(move || {
             let result = std::fs::create_dir_all(&base)
@@ -621,7 +673,52 @@ impl FilesFeature {
                 ..ItemProgress::default()
             })
             .collect();
-        t.dests = Some(dests);
+        if t.drag {
+            let top: Vec<DropItem> = t
+                .items
+                .iter()
+                .zip(&dests)
+                .filter(|(i, _)| i.path.len() == 1)
+                .filter_map(|(i, d)| {
+                    d.clone().map(|path| DropItem {
+                        path,
+                        is_dir: i.kind == ItemKind::Dir,
+                    })
+                })
+                .collect();
+            let peer = t.peer;
+            let progress = Arc::new(TransferProgress {
+                status: self.status.clone(),
+                id: transfer,
+            });
+            let sink = Arc::new(DropDone {
+                post: self.post.clone(),
+                transfer,
+            });
+            let begun = self
+                .drag
+                .as_ref()
+                .and_then(|w| w.target.as_ref())
+                .map(|target| target.begin(top, progress, sink));
+            if let Some(Err(e)) = begun {
+                warn!(%transfer, "cannot start the drag here: {e}");
+                Self::send(
+                    cx,
+                    peer,
+                    DragResult {
+                        transfer,
+                        dropped: false,
+                    }
+                    .into(),
+                );
+                self.drop_incoming(transfer, true);
+                self.set_state(transfer, TransferState::Cancelled);
+                return;
+            }
+        }
+        if let Some(t) = self.incoming.get_mut(&transfer) {
+            t.dests = Some(dests);
+        }
         self.pump(cx, transfer);
     }
 
@@ -865,6 +962,9 @@ impl FilesFeature {
     }
 
     fn drop_outgoing(&mut self, transfer: TransferId) -> Option<PeerId> {
+        if self.active_drag == Some(transfer) {
+            self.end_drag();
+        }
         let out = self.outgoing.remove(&transfer)?;
         for t in out.tasks.values() {
             t.abort();
@@ -881,6 +981,93 @@ impl FilesFeature {
         if let Some(peer) = peer {
             Self::send(cx, peer, Cancel { transfer }.into());
             self.set_state(transfer, TransferState::Cancelled);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorEvent {
+    Entered(PeerId),
+    Returned,
+}
+
+/// Drag and drop services (ADR-0008). Without a drop target (Wayland), dragged-in
+/// files are saved like any other transfer.
+pub struct DragWiring {
+    pub source: Arc<dyn DragSource>,
+    pub target: Option<Arc<dyn DropTarget>>,
+    /// Tells the input router that a file drag may cross with the button held.
+    pub set_drag_active: Arc<dyn Fn(bool) + Send + Sync>,
+}
+
+struct DragEvents(LocalPost);
+
+impl DragSink for DragEvents {
+    fn drag_entered(&self, paths: Vec<PathBuf>) {
+        (self.0)(Box::new(Local::DragEntered(paths)));
+    }
+    fn drag_left(&self) {
+        (self.0)(Box::new(Local::DragLeft));
+    }
+}
+
+struct DropDone {
+    post: LocalPost,
+    transfer: TransferId,
+}
+
+impl DropSink for DropDone {
+    fn dropped(&self, accepted: bool) {
+        (self.post)(Box::new(Local::Dropped {
+            transfer: self.transfer,
+            accepted,
+        }));
+    }
+}
+
+/// What an OS drop target waits on before reading staged files.
+struct TransferProgress {
+    status: StatusMap,
+    id: TransferId,
+}
+
+impl DropProgress for TransferProgress {
+    fn wait_complete(&self, timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let state = self
+                .status
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get(&self.id)
+                .map(|(s, _)| s.state.clone());
+            match state {
+                Some(TransferState::Done) => return true,
+                Some(TransferState::Running) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// Staged drops stay for a week: the target program may keep using them in place
+/// (a DAW referencing a sample, for instance).
+fn clean_staging(dir: &std::path::Path) {
+    let week = Duration::from_secs(7 * 24 * 3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > week);
+        if old {
+            let _ = std::fs::remove_dir_all(e.path());
         }
     }
 }
@@ -976,7 +1163,25 @@ impl Feature for FilesFeature {
         payload: &[u8],
     ) -> Result<(), FeatureError> {
         match FilesMessage::decode(kind, payload)? {
-            FilesMessage::Offer(o) => self.on_offer(cx, peer, o),
+            FilesMessage::Offer(o) => self.on_offer(cx, peer, o, false),
+            FilesMessage::DragOffer(d) => {
+                let staged = self.drag.as_ref().is_some_and(|w| w.target.is_some());
+                self.on_offer(cx, peer, d.offer, staged);
+            }
+            FilesMessage::DragResult(r) => {
+                if self.active_drag == Some(r.transfer)
+                    && self
+                        .outgoing
+                        .get(&r.transfer)
+                        .is_some_and(|o| o.peer == peer)
+                {
+                    self.end_drag();
+                    if !r.dropped {
+                        self.drop_outgoing(r.transfer);
+                        self.set_state(r.transfer, TransferState::Cancelled);
+                    }
+                }
+            }
             FilesMessage::Items(m) => self.on_items(cx, peer, m),
             FilesMessage::Decline(d) => {
                 if self
@@ -1060,10 +1265,65 @@ impl Feature for FilesFeature {
                 result,
                 reply,
             } => {
-                let r = result.and_then(|w| self.start_send(cx, peer, w));
+                let r = result.and_then(|w| self.start_send(cx, peer, w, false));
                 let _ = reply.send(r);
             }
             Local::Cancel(t) => self.cancel_local(cx, t),
+            Local::DragEntered(paths) => {
+                let post = self.post.clone();
+                self.rt
+                    .spawn_blocking(move || post(Box::new(Local::DragWalked(walk(&paths)))));
+            }
+            Local::DragWalked(Ok(w)) if self.active_drag.is_none() => {
+                self.pending_drag = Some(w);
+                self.set_drag_active(true);
+            }
+            Local::DragWalked(Ok(_)) => {}
+            Local::DragWalked(Err(e)) => warn!("cannot drag these files to another device: {e}"),
+            Local::DragLeft => {
+                if self.active_drag.is_none() && self.pending_drag.take().is_some() {
+                    self.set_drag_active(false);
+                }
+            }
+            Local::Cursor(CursorEvent::Entered(peer)) => {
+                if let Some(w) = self.pending_drag.take() {
+                    match self.start_send(cx, peer, w, true) {
+                        Ok(id) => {
+                            self.active_drag = Some(id);
+                            if let Some(d) = &self.drag {
+                                d.source.hold();
+                            }
+                        }
+                        Err(e) => {
+                            warn!("cannot drag the files there: {e}");
+                            self.set_drag_active(false);
+                        }
+                    }
+                }
+            }
+            Local::Cursor(CursorEvent::Returned) => {}
+            Local::Dropped { transfer, accepted } => {
+                if let Some(peer) = self.incoming.get(&transfer).map(|t| t.peer).or_else(|| {
+                    self.status
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .get(&transfer)
+                        .map(|(s, _)| s.peer)
+                }) {
+                    Self::send(
+                        cx,
+                        peer,
+                        DragResult {
+                            transfer,
+                            dropped: accepted,
+                        }
+                        .into(),
+                    );
+                }
+                if !accepted {
+                    self.cancel_local(cx, transfer);
+                }
+            }
             Local::Prepared { transfer, result } => self.on_prepared(cx, transfer, result),
             Local::SendDone {
                 transfer,

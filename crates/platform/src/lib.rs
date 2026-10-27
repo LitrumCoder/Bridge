@@ -76,8 +76,8 @@ pub fn native_clipboard() -> Result<Arc<dyn Clipboard>, PlatformError> {
     }
 }
 
-// TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
-// TODO(M6b): FILES clipboard format through the files engine.
+// TODO(M7): MidiPorts.
+// TODO(M6b+): FILES clipboard format through the files engine (virtual files).
 // TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -160,6 +160,87 @@ pub trait Clipboard: Send + Sync + 'static {
         provider: Arc<dyn ClipboardProvider>,
     ) -> Result<(), PlatformError>;
     fn stop(&self);
+}
+
+/// Reports drags of files that reach the screen edges (ADR-0008).
+pub trait DragSink: Send + Sync + 'static {
+    /// A drag carrying `paths` touched an outer edge.
+    fn drag_entered(&self, paths: Vec<std::path::PathBuf>);
+    /// It went back without crossing.
+    fn drag_left(&self);
+}
+
+/// "A drag leaves this device": invisible drop targets at the edges.
+pub trait DragSource: Send + Sync + 'static {
+    fn start(&self, sink: Arc<dyn DragSink>) -> Result<(), PlatformError>;
+    /// The drag crossed to another device: keep the local drag loop over Bridge's own
+    /// window, so the local drop (when the button is released) does nothing.
+    fn hold(&self);
+    /// The remote drop is over; back to edge strips.
+    fn finish(&self);
+    fn stop(&self);
+}
+
+/// A top-level item of a drag arriving here, at its staging path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct DropItem {
+    pub path: std::path::PathBuf,
+    pub is_dir: bool,
+}
+
+pub trait DropSink: Send + Sync + 'static {
+    /// The OS drag ended: dropped on a target that accepted it, or cancelled.
+    fn dropped(&self, accepted: bool);
+}
+
+/// Lets an OS drop target wait for the files it was promised.
+pub trait DropProgress: Send + Sync + 'static {
+    fn wait_complete(&self, timeout: std::time::Duration) -> bool;
+}
+
+/// "A drag arrives on this device": an OS drag session started under the injected
+/// cursor, with the button already held by injection.
+pub trait DropTarget: Send + Sync + 'static {
+    fn begin(
+        &self,
+        items: Vec<DropItem>,
+        progress: Arc<dyn DropProgress>,
+        sink: Arc<dyn DropSink>,
+    ) -> Result<(), PlatformError>;
+}
+
+pub type DragServices = (Arc<dyn DragSource>, Arc<dyn DropTarget>);
+
+/// The drag-and-drop services of this OS.
+pub fn native_drag() -> Result<DragServices, PlatformError> {
+    #[cfg(windows)]
+    {
+        Ok((
+            Arc::new(windows::WinDragSource::new()),
+            Arc::new(windows::WinDropTarget::new()),
+        ))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if linux_wayland::is_wayland_session() {
+            // A seamless drag between clients is impossible on Wayland (ADR-0015):
+            // drops land in the downloads folder instead.
+            return Err(PlatformError::Unsupported(
+                "dragging across devices is not possible on Wayland".into(),
+            ));
+        }
+        Ok((
+            Arc::new(linux_x11::XdndSource::new()?),
+            Arc::new(linux_x11::XdndTarget::new()?),
+        ))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        // TODO(macOS-final): NSDraggingDestination edges, NSFilePromiseProvider.
+        Err(PlatformError::Unsupported(
+            "dragging across devices is not available on this OS yet".into(),
+        ))
+    }
 }
 
 /// The services of one OS, as the daemon wires them.
