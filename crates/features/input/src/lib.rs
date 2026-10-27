@@ -180,7 +180,7 @@ impl InputFeature {
                 RouterAction::Warp { x, y } => self.platform.capture.warp(x, y),
                 RouterAction::Event(e) => {
                     debug!(?e, "input router");
-                    // TODO(M4b): edge glow and shake locator overlays.
+                    // TODO(M9): edge glow and shake locator overlays, drawn by the UI process.
                     self.last_event = Some(e);
                 }
             }

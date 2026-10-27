@@ -11,7 +11,11 @@ pub use bridge_core::input::{CaptureEvent, Decision};
 
 pub mod keymap;
 #[cfg(target_os = "linux")]
+pub mod linux_wayland;
+#[cfg(target_os = "linux")]
 pub mod linux_x11;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(any(test, feature = "mock"))]
 pub mod mock;
 #[cfg(windows)]
@@ -25,19 +29,24 @@ pub fn native() -> Result<Platform, PlatformError> {
     }
     #[cfg(target_os = "linux")]
     {
-        // TODO(M4c): prefer the Wayland portals when WAYLAND_DISPLAY is set.
-        linux_x11::platform()
+        if linux_wayland::is_wayland_session() {
+            linux_wayland::platform()
+        } else {
+            linux_x11::platform()
+        }
     }
-    #[cfg(not(any(windows, target_os = "linux")))]
+    #[cfg(target_os = "macos")]
     {
-        // TODO(M4c): macOS.
+        macos::platform()
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
         Err(PlatformError::Unsupported(
-            "input sharing on this OS arrives in milestone 4c".into(),
+            "input sharing is not available on this OS".into(),
         ))
     }
 }
 
-// TODO(M4c): macos (CGEventTap + CGEventPost), linux_wayland (portals + libei).
 // TODO(M5): Clipboard. TODO(M6b): DragSource, DropTarget. TODO(M7): MidiPorts.
 // TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 

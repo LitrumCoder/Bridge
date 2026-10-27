@@ -51,6 +51,7 @@
 | 3 | готово, коммит `9e6834a` |
 | 4a | готово, коммит `b4330e2` |
 | 4b | готово (см. git log): Windows (LL-хуки, `SendInput`, мониторы с DPI, раскладка, lock-клавиши), X11 (XInput2 raw, grab, XTest, RandR), таблицы HID ↔ set 1 / evdev, `bridged` включает ввод сам; нативные тесты: Windows (`BRIDGE_PLATFORM_TESTS=1`), X11 под Xvfb/WSLg. Оверлеи (подсветка края, локатор) перенесены в веху 9 — их рисует UI-процесс |
+| 4c | готово (хеш коммита — в HANDOFF.md): macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
 
 ## Отложено с этапа 1 (явные TODO)
 
@@ -70,4 +71,7 @@
 - XDS (direct save) для X11 (ADR-0008).
 - MIDI 2.0 / UMP (ADR-0009).
 - CI с реальным Wayland-композитором (ADR-0015).
+- macOS: синхронизация раскладки через Text Input Sources; Caps Lock через IOKit (`TODO(M4c+)`).
+- Wayland: раскладка и Lock-клавиши (нет в порталах), синтетический возврат курсора после `Deactivated`
+  (`TODO(M4c+)`); режим «переключение по хоткею» без InputCapture — веха 9.
 - MIDI на Android.

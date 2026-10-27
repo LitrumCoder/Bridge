@@ -27,5 +27,16 @@ windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_Wi
 [target."cfg(windows)".dev-dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CFCGTypes", "CFDictionary", "CFMachPort", "CFRunLoop", "CFString", "CFNumber"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "objc2", "libc", "CGDirectDisplay", "CGDisplayConfiguration", "CGError", "CGEvent", "CGEventSource", "CGEventTypes", "CGRemoteOperation"] }
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "HIServices", "AXUIElement"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.14.0", features = ["xinput", "xtest", "randr"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "input_capture", "remote_desktop", "screencast"] }
+reis = { version = "0.7.1", features = ["tokio"] }
+futures-util = { version = "0.3.34", default-features = false }
+rustix = { version = "1.1.5", features = ["time"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
+tracing.workspace = true
