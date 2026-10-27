@@ -33,52 +33,74 @@
 | 4c | `3d51159`, `a214883` | macOS (CGEventTap + CGEventPost, онбординг Accessibility; только `clippy --target aarch64-apple-darwin`), Wayland (InputCapture + RemoteDesktop + EIS через `ashpd`/`reis`; на композиторе не проверено) |
 | 5 | `6500bbd` | буфер обмена: протокол, фича с ленивой выдачей, Windows и X11 с нативными тестами; macOS и чистый Wayland — `Unsupported` |
 | 6a | `21d30ed` | движок файлов (докачка, BLAKE3, конфликты, отмена), bulk-соединение с LEDBAT, `bridge send/transfers/cancel` |
+| 6b | `9112a00` | перетаскивание: передача кнопки роутером, staging, Windows OLE, X11 XDND (нативный тест), mock-интеграция |
 
-Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92%.
+Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92,9%.
+Bulk с LEDBAT (горло 40 Мбит/с, очередь 1 МБ): p99 пинга 15,7 мс при базовых 13,1 мс; стандартный контроллер — 203 мс.
 
-## Следующее: веха 4c
+**macOS — в самом конце этапа** (решение владельца: нет техники Apple). Ввод 4c написан и собирается, всё
+остальное по macOS (буфер, drag, MIDI, сеть, раскладка, сборка UI) — `TODO(macOS-final)`, список в
+ROADMAP («Перенесено в конец этапа: macOS»). Таргеты `aarch64-apple-darwin` и `x86_64-unknown-linux-gnu`
+из rustup удалены ради места на C: — вернуть `rustup target add …` на этапе macOS.
 
-1. **macOS** (`crates/platform/src/macos/`, `#[cfg(target_os = "macos")]`):
-   - зависимости: `objc2-core-graphics 0.3.2`, `objc2-core-foundation 0.3.2`, `objc2-application-services 0.3.2`
-     (MIT/Zlib/Apache). Сначала выписать точные сигнатуры и feature-флаги из исходников (сабагентом);
-   - захват — сессионный `CGEventTap` (`Default`, с подавлением) на своём потоке с `CFRunLoop`. Нажатия — по
-     `kCGKeyboardEventKeycode` → `mac_to_hid`; дельты — `kCGMouseEventDeltaX/Y`. В режиме захвата —
-     `CGAssociateMouseAndMouseCursorPosition(false)` и подавление (вернуть NULL). Свою инъекцию отличать по
-     `kCGEventSourceUserData` = метка. При `TapDisabledByTimeout` включать tap заново, при `ByUserInput` — снимать;
-   - инъекция — `CGEventCreateKeyboardEvent`, `CGEventCreateMouseEvent`, скролл, затем `CGEventPost`;
-   - экраны — `CGGetActiveDisplayList` + `CGDisplayBounds` + `CGDisplayScreenSize` (мм);
-   - онбординг: `AXIsProcessTrustedWithOptions(prompt)` и понятная ошибка `PermissionRequired`;
-   - проверка: `rustup target add aarch64-apple-darwin`, затем
-     `cargo check --target aarch64-apple-darwin -p bridge-platform` (линковка не нужна). Запустить нельзя —
-     пометить в LIMITATIONS и MANUAL_TESTS.
-2. **Wayland**:
-   - `native()` в `crates/platform/src/lib.rs` должна при `XDG_SESSION_TYPE=wayland` не брать X11-бэкенд:
-     через XWayland он видит только X-клиентов;
-   - бэкенд на `ashpd 0.13` (порталы InputCapture и RemoteDesktop, `connect_to_eis`) и `reis 0.7` (MIT);
-   - при отсутствии порталов — `PlatformError::Unsupported` с текстом для пользователя.
-     Режим «переключение по хоткею» — через портал GlobalShortcuts или только для окна в фокусе (ADR-0015);
-   - проверить здесь негде: пометить как непроверенное.
-3. Добавить в CI задачу `macos-latest`: сборка и юнит-тесты (в матрице уже есть).
+## Следующее: веха 7 (MIDI)
 
-## Дальше: вехи 5–11
+Содержание и «готово, когда» — в `docs/ROADMAP.md`, решения — в ADR-0009, ARCHITECTURE §4.7 и §8.4.
 
-Их содержание — в `docs/ROADMAP.md`, решения — в ADR:
+Уже сделано и **не закоммичено** (черновики в рабочем дереве, в `lib.rs` не подключены, тесты не запускались):
 
-- 0007 — буфер обмена;
-- 0008 — перетаскивание;
-- 0009 — MIDI;
-- 0010 — UI;
-- 0012 — Android;
-- 0014 — тесты.
+- `crates/protocol/src/midi.rs` — `Ports`, `Events { port, events: [{ts, data}] }`, `is_valid_message`,
+  `data_len`. Подключить: `pub mod midi;` в `crates/protocol/src/lib.rs`.
+- `crates/core/src/midi.rs` — `MidiParser` (running status, real-time, SysEx ≤ 64 КиБ), `NoteTracker`
+  (ноты + педали CC64/66/67 → `release_all`), `JitterBuffer` (`ts_local + min_transit + buffer`, play-время
+  не убывает, опоздавшие — сразу, адаптивный режим по p99). Подключить: `pub mod midi;` в `core/src/lib.rs`.
 
-Важно:
+План (принятые решения):
 
-- **Веха 6a.** Bulk-соединение с delay-based контроллером: свой `quinn::congestion::Controller`. Для него нужна
-  прямая зависимость `quinn-proto 0.11.19` (`RttEstimator` не реэкспортирован). Тест — p99 задержки ввода при
-  передаче 2 ГБ через netsim с узким горлом.
-- **Веха 7.** На Windows сначала проверить Windows MIDI Services (только 11 25H2+). Запасной путь — loopMIDI,
-  который ставит пользователь.
-- **Вехи 9 и 10.** Нужны Node (есть, v24) и Android SDK/JDK (нет на машине).
+1. В `PeerView` добавить `clock_offset: Option<i64>` из `Core::clock()` (это `their − our`, мкс), чтобы
+   переводить метки отправителя в своё время.
+2. Трейт `MidiPorts` в `platform`: `inputs/outputs`, `open_input(name, sink)`, `open_output(name)`,
+   `virtual_source(name)` (приложения видят как вход), `virtual_destination(name, sink)`, `is_own(name)`.
+   Метка времени в `MidiSink::on_midi` — `Instant`, фича переводит её в `Micros` узла через якорь
+   `(cx.now(), Instant::now())`.
+3. Фича `bridge-feature-midi`:
+   - канал `ChannelClass::Midi`, право `MIDI`;
+   - отправитель шлёт `Ports` и пачки `Events` (кадр ≤ 72 КиБ);
+   - у приёмника — **свой поток проигрывания** с точным сном. Тик узла слишком грубый для буфера в 3 мс;
+   - `NoteTracker` на (пир, порт): при разрыве — note-off и педали в 0, порт живёт 10 с, при `Left` закрывается.
+4. Платформы:
+   - **Windows** — `midir 0.11` (WinMM, тянет `windows` 0.59–0.62, совпадёт с нашим 0.62) для физических портов.
+     Виртуальные порты — режим loopMIDI: пользователь создаёт `Bridge In`/`Bridge Out`, мы их находим по
+     имени. Одно соединение на порт держать в кэше.
+   - **Spike WMS:** служба `MidiSrv` на этой машине есть (Windows 11 25H2), но привязки
+     `Windows.Devices.Midi2` требуют `.winmd` из NuGet SDK. Если без сети не получить — `TODO(M7+)` и
+     LIMITATIONS.
+   - **Linux** — ALSA sequencer через `dlopen("libasound.so.2")` (`libloading` 0.7.4 в кэше, ISC), без
+     `alsa-sys`: в WSL нет ни `libasound2-dev`, ни `pkg-config`, ни `/dev/snd`. Минимальный FFI:
+     `snd_seq_open/create_simple_port/event_output_direct/event_input/connect_from/connect_to`,
+     `snd_midi_event_*`; `snd_seq_event_t` — `#[repr(C)]`, 28 байт. Нет библиотеки — `Unsupported`.
+   - **macOS** — в конце этапа.
+5. Тесты:
+   - proptest монотонности jitter-буфера;
+   - netsim с потерями и джиттером: порядок и полнота;
+   - отпускание нот при разрыве;
+   - бенчмарк задержки и джиттера (mock-порты, цель из ADR — < 5 мс поверх сети) + запись в `benches/targets.toml`.
+6. MANUAL_TESTS: DAW (Ableton/Reaper/FL/Bitwig), loopMIDI, «выдернуть сеть с зажатой нотой».
+
+## Дальше: вехи 8–11
+
+- 8 — состояния Pause/Leave/Rejoin, `NetworkMonitor`, профили сетей (ADR-0016);
+- 9 — Tauri + Svelte UI (ADR-0010). Нужен Node (есть, v24). Сюда же:
+  - оверлеи (край, локатор), диалог подтверждения входящих файлов, режим хоткея для Wayland без InputCapture;
+- 10 — Android (ADR-0012). Android SDK/JDK на машине нет;
+- 11 — выпуск этапа, затем блок macOS.
+
+Важные TODO от прошлых вех:
+
+- виртуальные файлы Windows (`FILEDESCRIPTORW`/`FILECONTENTS`) для drag и формата FILES в буфере;
+- буфер на чистом Wayland (`ext-data-control`);
+- раскладка на X11/Wayland/macOS;
+- персистентные передачи файлов.
 
 ## Окружение и подводные камни
 
@@ -97,11 +119,19 @@
   `cargo deny check licenses bans sources`, advisories — в CI.
 - **Платформенные тесты** (опциональные):
   - Windows: `BRIDGE_PLATFORM_TESTS=1 cargo test -p bridge-platform --features mock --test windows_native -- --test-threads=1`;
-  - X11 в WSLg: `DISPLAY=:0 BRIDGE_X11_TESTS=1 cargo test -p bridge-platform --features mock --test x11_native`;
+  - X11 в WSLg: `DISPLAY=:0 BRIDGE_X11_TESTS=1 cargo test -p bridge-platform --features mock --test x11_native -- --test-threads=1`
+    (тесты двигают один курсор — только последовательно);
   - mDNS: `BRIDGE_MDNS_TEST=1`.
 - **Демоны с вводом** на этой машине не запускать парами: два набора хуков на одном рабочем столе мешают
   пользователю. Дымовые тесты двух `bridged` — только с `--no-input`.
 - **Права в WSL**: `sudo` с паролем, поэтому пакеты (xvfb, libasound2-dev) ставит владелец.
+- **Диск C: был заполнен до 0 байт.** Виртуальный диск WSL (`ext4.vhdx`, 20 ГБ) не смог расти, и git в WSL
+  падал с `Input/output error`. Помогли `wsl --shutdown` и чистка `~/bridge-target/*/incremental`. В WSL
+  собирать с `CARGO_INCREMENTAL=0`. Если git в WSL снова даёт I/O error — проверить свободное место на C:.
+- **Нативные Windows-тесты** трогают живой рабочий стол. Пока владелец работает за машиной (или включён экран
+  блокировки), `SendInput` и захват буфера иногда отказывают. По отдельности тесты проходят.
+- **Сетевой симулятор на Windows**: тесты с bulk-трафиком вызывают `bridge_testkit::fine_timers()`
+  (`timeBeginPeriod(1)`). Иначе шаг таймера 15,6 мс выглядит для LEDBAT как очередь.
 - **Полный прогон перед коммитом**:
   1. `cargo fmt --all`;
   2. `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`;
@@ -109,6 +139,7 @@
   4. `cargo xtask check-deps`;
   5. `cargo deny ... licenses bans sources`;
   6. `cargo llvm-cov -p bridge-protocol -p bridge-core --ignore-filename-regex 'strategy\.rs' --fail-under-lines 85`;
-  7. то же самое в WSL.
+  7. нативные тесты (Windows, X11 в WSLg) — для вех, где менялась платформа;
+  8. то же самое в WSL.
 - **Раскладка экранов в тестах.** Чей экран окажется справа, зависит от того, чья версия раскладки победит.
   Тесты определяют направление по раскладке (`testkit/tests/input.rs::direction`).
