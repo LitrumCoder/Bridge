@@ -8,11 +8,26 @@ pub use bridge_protocol::clipboard::ClipFormat;
 use bridge_protocol::input::{HidUsage, LayoutTag, LockState, MouseButton};
 
 pub mod clipfmt;
+mod midi;
+
+pub use midi::{MidiIn, MidiOut, MidiPorts, MidiSink, native_midi};
+
+/// Asks for 1 ms timer resolution for the rest of the process. Windows sleeps in
+/// 15.6 ms steps otherwise, far too coarse for a 3 ms MIDI jitter buffer.
+pub fn fine_timers() {
+    #[cfg(windows)]
+    // SAFETY: plain call; the period is restored when the process exits.
+    unsafe {
+        windows_sys::Win32::Media::timeBeginPeriod(1);
+    }
+}
 
 pub use bridge_core::LocalScreen;
 pub use bridge_core::input::{CaptureEvent, Decision};
 
 pub mod keymap;
+#[cfg(target_os = "linux")]
+pub mod linux_alsa;
 #[cfg(target_os = "linux")]
 pub mod linux_wayland;
 #[cfg(target_os = "linux")]
@@ -76,7 +91,6 @@ pub fn native_clipboard() -> Result<Arc<dyn Clipboard>, PlatformError> {
     }
 }
 
-// TODO(M7): MidiPorts.
 // TODO(M6b+): FILES clipboard format through the files engine (virtual files).
 // TODO(M8): NetworkMonitor. TODO(M9): Overlay (edge glow, locator) in the UI process.
 

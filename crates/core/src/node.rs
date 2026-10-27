@@ -1120,6 +1120,7 @@ impl Core {
                     allows_us: permission.is_none_or(|p| s.remote_grants.contains(&p)),
                     state: s.remote_state,
                     platform: s.peer.as_ref().map_or(Platform::UNKNOWN, |p| p.platform),
+                    clock_offset: s.clock.estimate().map(|e| e.offset),
                 })
             })
             .collect();

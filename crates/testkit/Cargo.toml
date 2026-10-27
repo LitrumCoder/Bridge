@@ -10,6 +10,7 @@ repository.workspace = true
 bridge-core.workspace = true
 bridge-daemon.workspace = true
 bridge-feature-input.workspace = true
+bridge-feature-midi.workspace = true
 bridge-platform = { workspace = true, features = ["mock"] }
 bridge-protocol.workspace = true
 bridge-transport.workspace = true
@@ -30,6 +31,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 [[bench]]
 name = "input_latency"
+harness = false
+
+[[bench]]
+name = "midi_latency"
 harness = false
 
 [lints]

@@ -19,6 +19,7 @@ mod frame;
 mod ids;
 pub mod input;
 mod message;
+pub mod midi;
 #[cfg(any(test, feature = "proptest"))]
 pub mod strategy;
 mod version;

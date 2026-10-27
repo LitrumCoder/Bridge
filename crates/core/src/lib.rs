@@ -7,6 +7,7 @@ pub mod clock;
 mod feature;
 pub mod input;
 mod layout;
+pub mod midi;
 mod node;
 pub mod pairing;
 mod scheduler;

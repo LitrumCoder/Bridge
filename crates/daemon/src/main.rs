@@ -11,6 +11,7 @@ use bridge_discovery::MdnsDiscovery;
 use bridge_feature_clipboard::{ClipboardConfig, ClipboardFeature};
 use bridge_feature_files::{CursorEvent, DragWiring, FilesConfig, FilesFeature};
 use bridge_feature_input::{InputConfig, InputFeature, Wake};
+use bridge_feature_midi::{MidiConfig, MidiFeature};
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
 use bridge_transport::DeviceIdentity;
@@ -47,6 +48,9 @@ struct Args {
     /// Do not send or receive files.
     #[arg(long)]
     no_files: bool,
+    /// Do not forward MIDI.
+    #[arg(long)]
+    no_midi: bool,
     /// Where received files go (default: Downloads/Bridge).
     #[arg(long)]
     download_dir: Option<PathBuf>,
@@ -148,6 +152,19 @@ async fn run(args: Args) -> Result<(), String> {
     }
     if let Some(f) = files {
         builder = builder.feature(f).map_err(|e| e.to_string())?;
+    }
+    if !args.no_midi {
+        match bridge_platform::native_midi() {
+            Ok(ports) => {
+                let post = builder
+                    .local_sender(bridge_protocol::FeatureId::MIDI)
+                    .into_post();
+                let (feature, _stats) =
+                    MidiFeature::new(ports, MidiConfig::new(name.clone()), post);
+                builder = builder.feature(feature).map_err(|e| e.to_string())?;
+            }
+            Err(e) => warn!("MIDI forwarding is unavailable: {e}"),
+        }
     }
     if !args.no_clipboard {
         match bridge_platform::native_clipboard() {

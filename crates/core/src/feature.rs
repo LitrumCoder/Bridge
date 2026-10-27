@@ -74,6 +74,8 @@ pub struct PeerView {
     /// What the peer last announced (`Paused` peers keep the connection but not the cursor).
     pub state: DeviceState,
     pub platform: bridge_protocol::Platform,
+    /// `their clock − our clock` in microseconds, once clock sync has samples.
+    pub clock_offset: Option<i64>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]

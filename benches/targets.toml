@@ -16,3 +16,10 @@ max_ns = 400
 id = "input/key_capture_to_injection_loopback"
 statistic = "median"
 max_ns = 500000
+
+# Note on A's instrument → B's virtual source, over 127.0.0.1, with the default 3 ms
+# jitter buffer. ADR-0009: under 5 ms added. Reference: 3.18 ms median (2026-10-27).
+[[bench]]
+id = "midi/note_instrument_to_daw_loopback"
+statistic = "median"
+max_ns = 5000000

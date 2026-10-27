@@ -10,7 +10,8 @@ use tokio::sync::Notify;
 use crate::{
     CaptureEvent, CaptureSink, ClipChange, ClipFormat, Clipboard, ClipboardProvider, ClipboardSink,
     Decision, DragSink, DragSource, DropItem, DropProgress, DropSink, DropTarget, InputCapture,
-    InputInjector, LocalScreen, Platform, PlatformError, ScreenInfo,
+    InputInjector, LocalScreen, MidiIn, MidiOut, MidiPorts, MidiSink, Platform, PlatformError,
+    ScreenInfo,
 };
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -416,6 +417,180 @@ impl DropTarget for MockDropTarget {
         lock(&self.sessions).push((items, progress, sink));
         self.changed.notify_waiters();
         Ok(())
+    }
+}
+
+type Timed = Vec<(std::time::Instant, Vec<u8>)>;
+
+#[derive(Default)]
+struct MidiState {
+    inputs: Vec<String>,
+    outputs: Vec<String>,
+    input_sinks: std::collections::HashMap<String, Arc<dyn MidiSink>>,
+    dest_sinks: std::collections::HashMap<String, Arc<dyn MidiSink>>,
+    written: std::collections::HashMap<String, Timed>,
+}
+
+/// Instruments the test plays and a DAW whose ports it inspects.
+#[derive(Default)]
+pub struct MockMidi {
+    state: Arc<Mutex<MidiState>>,
+    changed: Arc<Notify>,
+}
+
+impl MockMidi {
+    pub fn with_instrument(name: &str) -> Self {
+        let m = Self::default();
+        lock(&m.state).inputs.push(name.to_owned());
+        lock(&m.state).outputs.push(name.to_owned());
+        m
+    }
+
+    /// The instrument sends `msg` (only if the port is open).
+    pub fn play(&self, input: &str, msg: &[u8]) -> bool {
+        let sink = lock(&self.state).input_sinks.get(input).cloned();
+        sink.map(|s| s.on_midi(std::time::Instant::now(), msg))
+            .is_some()
+    }
+
+    /// The DAW plays `msg` into one of our virtual destinations.
+    pub fn daw_play(&self, dest: &str, msg: &[u8]) -> bool {
+        let sink = lock(&self.state).dest_sinks.get(dest).cloned();
+        sink.map(|s| s.on_midi(std::time::Instant::now(), msg))
+            .is_some()
+    }
+
+    /// What reached port `name` (a virtual source or a physical output), with times.
+    pub fn written(&self, name: &str) -> Timed {
+        lock(&self.state)
+            .written
+            .get(name)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn virtual_ports(&self) -> Vec<String> {
+        let s = lock(&self.state);
+        let mut v: Vec<String> = s
+            .dest_sinks
+            .keys()
+            .chain(s.written.keys())
+            .filter(|n| !s.outputs.contains(n))
+            .cloned()
+            .collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    pub async fn wait_written(
+        &self,
+        name: &str,
+        count: usize,
+        timeout: std::time::Duration,
+    ) -> bool {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let notified = self.changed.notified();
+                if self.written(name).len() >= count {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+struct MockMidiIn {
+    state: Arc<Mutex<MidiState>>,
+    name: String,
+    dest: bool,
+}
+
+impl MidiIn for MockMidiIn {}
+
+impl Drop for MockMidiIn {
+    fn drop(&mut self) {
+        let mut s = lock(&self.state);
+        if self.dest {
+            s.dest_sinks.remove(&self.name);
+        } else {
+            s.input_sinks.remove(&self.name);
+        }
+    }
+}
+
+struct MockMidiOut {
+    state: Arc<Mutex<MidiState>>,
+    changed: Arc<Notify>,
+    name: String,
+}
+
+impl MidiOut for MockMidiOut {
+    fn send(&mut self, msg: &[u8]) -> Result<(), PlatformError> {
+        lock(&self.state)
+            .written
+            .entry(self.name.clone())
+            .or_default()
+            .push((std::time::Instant::now(), msg.to_vec()));
+        self.changed.notify_waiters();
+        Ok(())
+    }
+}
+
+impl MockMidi {
+    fn out(&self, name: &str) -> Box<dyn MidiOut> {
+        lock(&self.state)
+            .written
+            .entry(name.to_owned())
+            .or_default();
+        Box::new(MockMidiOut {
+            state: self.state.clone(),
+            changed: self.changed.clone(),
+            name: name.to_owned(),
+        })
+    }
+}
+
+impl MidiPorts for MockMidi {
+    fn inputs(&self) -> Vec<String> {
+        lock(&self.state).inputs.clone()
+    }
+    fn outputs(&self) -> Vec<String> {
+        lock(&self.state).outputs.clone()
+    }
+    fn open_input(
+        &self,
+        name: &str,
+        sink: Arc<dyn MidiSink>,
+    ) -> Result<Box<dyn MidiIn>, PlatformError> {
+        lock(&self.state).input_sinks.insert(name.to_owned(), sink);
+        Ok(Box::new(MockMidiIn {
+            state: self.state.clone(),
+            name: name.to_owned(),
+            dest: false,
+        }))
+    }
+    fn open_output(&self, name: &str) -> Result<Box<dyn MidiOut>, PlatformError> {
+        Ok(self.out(name))
+    }
+    fn virtual_source(&self, name: &str) -> Result<Box<dyn MidiOut>, PlatformError> {
+        Ok(self.out(name))
+    }
+    fn virtual_destination(
+        &self,
+        name: &str,
+        sink: Arc<dyn MidiSink>,
+    ) -> Result<Box<dyn MidiIn>, PlatformError> {
+        lock(&self.state).dest_sinks.insert(name.to_owned(), sink);
+        self.changed.notify_waiters();
+        Ok(Box::new(MockMidiIn {
+            state: self.state.clone(),
+            name: name.to_owned(),
+            dest: true,
+        }))
     }
 }
 

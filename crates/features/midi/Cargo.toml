@@ -9,6 +9,8 @@ repository.workspace = true
 [dependencies]
 bridge-core.workspace = true
 bridge-platform.workspace = true
+bridge-protocol.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

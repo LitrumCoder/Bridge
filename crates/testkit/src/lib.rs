@@ -5,6 +5,7 @@
 
 pub mod cluster;
 pub mod loopback;
+pub mod midi_pair;
 pub mod netsim;
 
 pub use cluster::{NodeSpec, TestNode, mutually_trusting, strangers, test_options};
