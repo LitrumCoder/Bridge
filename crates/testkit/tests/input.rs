@@ -215,14 +215,13 @@ async fn connection_loss_releases_held_keys_on_the_target() {
             .wait_for(WAIT, |l| l.contains(&Injected::Key {
                 usage: HidUsage::LEFT_SHIFT,
                 down: false
+            }) && l.contains(&Injected::Button {
+                button: MouseButton::Left,
+                down: false
             }))
             .await,
-        "the target releases keys by itself when the source disappears"
+        "the target releases keys and buttons by itself when the source disappears"
     );
-    assert!(mb.injector.log().contains(&Injected::Button {
-        button: MouseButton::Left,
-        down: false
-    }));
     assert!(mb.injector.held_keys().is_empty());
 
     let home = tokio::time::timeout(WAIT, async {
