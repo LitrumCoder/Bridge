@@ -38,7 +38,8 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: bash .github/scripts/annotate.sh cargo test --workspace --locked
+        shell: bash
       - run: cargo xtask check-deps
 
   platform-x11:
@@ -67,13 +68,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+      - uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2.87.32
         with:
-          command: check advisories bans licenses sources
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          manifest-path: fuzz/Cargo.toml
-          command: check licenses
+          tool: cargo-deny
+      - run: bash .github/scripts/annotate.sh cargo deny --locked check advisories bans licenses sources
+      - run: bash .github/scripts/annotate.sh cargo deny --locked --manifest-path fuzz/Cargo.toml check licenses
+      - run: bash .github/scripts/annotate.sh cargo deny --locked --manifest-path apps/desktop/src-tauri/Cargo.toml check licenses
 
   coverage:
     name: coverage (protocol, core >= 85%)
@@ -103,7 +103,7 @@ jobs:
         working-directory: fuzz
         run: |
           for t in $(cargo +nightly fuzz list); do
-            cargo +nightly fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=1024
+            bash ../.github/scripts/annotate.sh cargo +nightly fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=1024
           done
 
   bench:
@@ -113,5 +113,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: cargo bench --locked -p bridge-protocol -p bridge-testkit -- --noplot
-      - run: cargo xtask bench-check
+      - run: bash .github/scripts/annotate.sh cargo bench --locked -p bridge-protocol -p bridge-testkit -- --noplot
+      - run: bash .github/scripts/annotate.sh cargo xtask bench-check
