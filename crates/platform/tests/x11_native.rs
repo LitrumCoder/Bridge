@@ -95,13 +95,18 @@ fn xtest_injection_is_seen_by_xinput2_capture() {
     // While grabbed, motion keeps arriving as raw deltas.
     rec.0.lock().unwrap().clear();
     capture.set_grab(true);
-    injector.move_rel(-7, 3).unwrap();
-    assert!(
-        wait(&rec, |l| l
-            .iter()
-            .any(|e| matches!(e, CaptureEvent::Motion { .. }))),
-        "motion while grabbed"
-    );
+    // The grab takes effect asynchronously on the X server; a move sent before it may be lost.
+    let mut moved = false;
+    for _ in 0..5 {
+        injector.move_rel(-7, 3).unwrap();
+        if wait(&rec, |l| {
+            l.iter().any(|e| matches!(e, CaptureEvent::Motion { .. }))
+        }) {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "motion while grabbed");
     capture.set_grab(false);
 
     let locks = screens.locks();
