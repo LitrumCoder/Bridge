@@ -291,7 +291,7 @@ impl Feature for InputFeature {
         let seq = motion.seq();
         match self.injected.on_motion(peer, motion) {
             Some(a) => {
-                if seq % 64 == 0 {
+                if seq.is_multiple_of(64) {
                     debug!(%peer, seq, ?a, "motion applied");
                 }
                 self.apply(vec![a]);
