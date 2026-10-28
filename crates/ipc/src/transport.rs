@@ -255,7 +255,7 @@ mod tests {
     #[test]
     fn endpoint_names_are_sanitised() {
         assert_eq!(sanitize("Ив ан\\x"), "______x");
-        assert_eq!(sanitize("user-pc_1"), "user-pc_1");
+        assert_eq!(sanitize("alice-pc_1"), "alice-pc_1");
         assert!(!default_endpoint().is_empty());
     }
 }

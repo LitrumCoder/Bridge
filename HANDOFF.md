@@ -18,7 +18,7 @@
 - Документация пишется по-русски, код и комментарии — по-английски, комментариев мало.
 - Рутинное чтение документации и исходников отдавать сабагентам (`model: haiku`).
 - API библиотек сверять по исходникам в
-  `C:\Users\user\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\<crate>-<ver>\`, а не по памяти.
+  `%USERPROFILE%\.cargo\registry\src\index.crates.io-*\<crate>-<ver>\`, а не по памяти.
 
 ## Готово (коммиты в `main`, только локально)
 
@@ -35,6 +35,7 @@
 | 6a | `21d30ed` | движок файлов (докачка, BLAKE3, конфликты, отмена), bulk-соединение с LEDBAT, `bridge send/transfers/cancel` |
 | 6b | `9112a00` | перетаскивание: передача кнопки роутером, staging, Windows OLE, X11 XDND (нативный тест), mock-интеграция |
 | 7 | `af507c0` | MIDI: протокол, парсер/трекер/jitter-буфер (proptest), поток проигрывания, Windows WinMM + loopMIDI, Linux ALSA через `dlopen`; p50 3,18 мс |
+| 8 | `0832e44` | состояния Pause/Leave/Rejoin, `NetworkMonitor`, профили сетей с автовыходом/автовозвратом, тесты на 3 узлах |
 
 Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92,9%.
 Bulk с LEDBAT (горло 40 Мбит/с, очередь 1 МБ): p99 пинга 15,7 мс при базовых 13,1 мс; стандартный контроллер — 203 мс.
@@ -43,6 +44,28 @@ Bulk с LEDBAT (горло 40 Мбит/с, очередь 1 МБ): p99 пинг�
 остальное по macOS (буфер, drag, MIDI, сеть, раскладка, сборка UI) — `TODO(macOS-final)`, список в
 ROADMAP («Перенесено в конец этапа: macOS»). Таргеты `aarch64-apple-darwin` и `x86_64-unknown-linux-gnu`
 из rustup удалены ради места на C: — вернуть `rustup target add …` на этапе macOS.
+
+## ⚠ Сейчас: веха 9 (UI) — В РАБОТЕ, НЕ ЗАКОММИЧЕНА
+
+Сессия остановлена посреди вехи 9 (у владельца кончались токены). Всё ниже лежит в рабочем дереве без коммита.
+
+Готово и проверено:
+- daemon/IPC: `SetLayout`, `MidiStreams`, `Events{since}` → `Midi`, `Events{next, events}`, кольцо `UiEvents` (64);
+  CLI их печатает; clippy по workspace чистый.
+- `apps/desktop` (Svelte 5 + Vite 8): разделы Devices/Layout/Files/Midi/Network/Settings, `lib/` (ipc, daemon-store,
+  base32, layout со snap, i18n ru/en, settings), mock-демон `src/lib/mock.ts` (`npm run build:mock`).
+  `npm run check` — 0 ошибок, `npm run build` и `build:mock` собираются.
+- `apps/desktop/src-tauri` (отдельный workspace): команды `ipc` и `qr_svg`, трей (Open/Pause/Resume/Disconnect/Rejoin/Quit),
+  скрытие в трей при закрытии, single-instance, dialog, capabilities, иконки (сгенерированы скриптом).
+
+Не проверено / не сделано:
+- `cargo build` в `src-tauri` запущен, но результат не просмотрен (сеть к crates.io нестабильна:
+  `CARGO_HTTP_CHECK_REVOKE=false`, локальный прокси). Версии tauri в Cargo.toml — минимальные 2.x, проверить lock.
+- `npm test` (tests/unit/lib.test.ts, app.test.ts) ни разу не запускался.
+- Playwright e2e по `dist-mock` (`PLAYWRIGHT_BROWSERS_PATH=D:\pw-browsers`), job tauri-driver в CI, CI-jobs для app,
+  `cargo deny` для app-workspace.
+- Документы: ADR-0010 (реализация), LIMITATIONS (оверлеи локатора между устройствами — TODO), MANUAL_TESTS U1…, строка 9 в ROADMAP.
+- Полные проверки Windows + WSL, коммит M9, хеш в таблицу. Затем M10 (Android), M11, блок macOS-final.
 
 ## Следующее: веха 7 (MIDI)
 
@@ -107,8 +130,9 @@ ROADMAP («Перенесено в конец этапа: macOS»). Таргет
 
 - **git** есть только в WSL: `wsl -e bash -c "cd '/mnt/d/клодик/bridge' && git ..."`. Коммит — через скрипт-файл
   с сообщением из файла (`git commit -F`).
-- **Remote и push** блокирует классификатор автодействий («Remote Repoint»). Делает владелец после создания
-  репозитория (поле `repository` в `Cargo.toml` — заглушка `OWNER/bridge`).
+- **Remote**: `origin` = `git@github.com:LitrumCoder/Bridge.git` (публичный). Push — только по просьбе владельца.
+  Автор коммитов — `Lytrum <116316417+LitrumCoder@users.noreply.github.com>` (личную почту в истории не светить).
+- **Релиз**: тег `v*` → `.github/workflows/release.yml` собирает `bridged`/`bridge` и приложение под Windows/Linux/macOS.
 - **Rust** 1.99.0 закреплён в `rust-toolchain.toml`. В WSL: `source ~/.cargo/env; export CARGO_TARGET_DIR=~/bridge-target`.
   Nightly и cargo-fuzz в WSL установлены.
 - **PowerShell 5.1**:

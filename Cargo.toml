@@ -23,7 +23,7 @@ exclude = ["fuzz"]
 version = "0.1.0"
 edition = "2024"
 publish = false
-repository = "https://github.com/OWNER/bridge"
+repository = "https://github.com/LitrumCoder/Bridge"
 
 [workspace.dependencies]
 bridge-protocol = { path = "crates/protocol" }

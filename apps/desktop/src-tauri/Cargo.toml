@@ -1,0 +1,36 @@
+[package]
+name = "bridge-app"
+description = "Desktop UI of Bridge: a Tauri shell over the daemon's IPC."
+version = "0.1.0"
+edition = "2024"
+publish = false
+repository = "https://github.com/LitrumCoder/Bridge"
+
+# Separate workspace: the main one stays free of webview dependencies (ADR-0010).
+[workspace]
+members = ["."]
+
+[lib]
+name = "bridge_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bridge-app"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.5", features = [] }
+
+[dependencies]
+bridge-ipc = { path = "../../../crates/ipc" }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
+serde_json = "1.0.154"
+tauri = { version = "2.9", features = ["tray-icon"] }
+tauri-plugin-dialog = "2.4"
+tauri-plugin-single-instance = "2.3"
+tokio = { version = "1.54.1", features = ["sync"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

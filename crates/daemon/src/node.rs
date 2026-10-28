@@ -370,6 +370,17 @@ impl NodeHandle {
             .is_ok_and(|r| r.is_ok())
     }
 
+    /// Publishes an arrangement from the layout editor (checked like a peer's).
+    pub fn set_layout(
+        &self,
+        screens: Vec<bridge_protocol::control::ScreenPlacement>,
+    ) -> Result<(), String> {
+        self.inner
+            .input
+            .send(Input::SetLayout(screens))
+            .map_err(|_| "the node stopped".to_owned())
+    }
+
     /// Pause, resume, leave the group or rejoin it (ARCHITECTURE §4.2).
     pub fn set_state(&self, cmd: StateCommand) {
         let _ = self.inner.input.send(Input::State(cmd));
@@ -990,6 +1001,7 @@ enum Input {
     },
     SetScreens(Vec<bridge_core::LocalScreen>),
     State(StateCommand),
+    SetLayout(Vec<bridge_protocol::control::ScreenPlacement>),
     Network(Option<NetworkFingerprint>),
     Profiles(oneshot::Sender<(Vec<NetworkProfile>, Option<String>)>),
     SaveProfile {
@@ -1135,6 +1147,11 @@ impl Driver {
                 }
             }
             Input::Network(fp) => self.machine.network_seen(now, fp),
+            Input::SetLayout(screens) => {
+                if let Err(e) = self.core.set_layout(now, screens) {
+                    warn!("the edited layout is invalid: {e}");
+                }
+            }
             Input::Profiles(reply) => {
                 let current = self.machine.current_profile().map(|p| p.name.clone());
                 let _ = reply.send((self.machine.profiles().to_vec(), current));

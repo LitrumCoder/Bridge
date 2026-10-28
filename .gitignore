@@ -5,6 +5,10 @@
 node_modules/
 dist/
 /apps/desktop/src-tauri/target
+/apps/desktop/src-tauri/gen
+/apps/desktop/dist-mock
+/apps/desktop/test-results
+/apps/desktop/playwright-report
 /apps/android/.gradle
 /apps/android/build
 /apps/android/app/build

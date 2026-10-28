@@ -336,6 +336,36 @@ fn print_response(response: Response, as_json: bool) -> Result<(), String> {
                 );
             }
         }
+        Response::Midi(list) => {
+            for m in &list {
+                println!(
+                    "{} port {} {}: {} events, {} late, transit {} µs + buffer {} µs",
+                    m.device.fingerprint(),
+                    m.port,
+                    if m.to_instrument {
+                        "→ instrument"
+                    } else {
+                        "→ apps"
+                    },
+                    m.events,
+                    m.late,
+                    m.min_transit_us,
+                    m.buffer_us
+                );
+            }
+        }
+        Response::Events { next, events } => {
+            if as_json {
+                println!(
+                    "{}",
+                    json!({ "next": next, "events": format!("{events:?}") })
+                );
+            } else {
+                for e in &events {
+                    println!("{e:?}");
+                }
+            }
+        }
         Response::Profiles(list) => {
             if as_json {
                 let v: Vec<_> = list

@@ -12,6 +12,7 @@ use bridge_feature_clipboard::{ClipboardConfig, ClipboardFeature};
 use bridge_feature_files::{CursorEvent, DragWiring, FilesConfig, FilesFeature};
 use bridge_feature_input::{InputConfig, InputFeature, Wake};
 use bridge_feature_midi::{MidiConfig, MidiFeature};
+use bridge_ipc::UiEvent;
 use bridge_ipc::{IpcClient, IpcServer, default_endpoint};
 use bridge_protocol::DeviceId;
 use bridge_transport::DeviceIdentity;
@@ -139,14 +140,29 @@ async fn run(args: Args) -> Result<(), String> {
                     Arc::new(move || local.post(Wake)),
                 )
                 .map_err(|e| format!("input: {e}"))?;
-                if let (Some(f), Some(handle)) = (files.take(), services.files.clone()) {
+                if let Some(f) = files.take() {
                     files = Some(with_drag(f, &feature));
-                    feature = feature.on_router_event(Arc::new(move |e| match e {
-                        RouterEvent::Entered { peer } => handle.cursor(CursorEvent::Entered(*peer)),
-                        RouterEvent::Returned { .. } => handle.cursor(CursorEvent::Returned),
-                        _ => {}
-                    }));
                 }
+                let (files_events, ui) = (services.files.clone(), services.events.clone());
+                feature = feature.on_router_event(Arc::new(move |e| {
+                    let ev = match e {
+                        RouterEvent::Entered { peer } => {
+                            if let Some(h) = &files_events {
+                                h.cursor(CursorEvent::Entered(*peer));
+                            }
+                            UiEvent::Entered { device: *peer }
+                        }
+                        RouterEvent::Returned { .. } => {
+                            if let Some(h) = &files_events {
+                                h.cursor(CursorEvent::Returned);
+                            }
+                            UiEvent::Returned
+                        }
+                        RouterEvent::Locked(on) => UiEvent::Locked(*on),
+                        RouterEvent::Shake { device } => UiEvent::Shake { device: *device },
+                    };
+                    ui.push(ev);
+                }));
                 builder = builder
                     .screens(screens.screens())
                     .feature(feature)
@@ -165,8 +181,8 @@ async fn run(args: Args) -> Result<(), String> {
                 let post = builder
                     .local_sender(bridge_protocol::FeatureId::MIDI)
                     .into_post();
-                let (feature, _stats) =
-                    MidiFeature::new(ports, MidiConfig::new(name.clone()), post);
+                let (feature, stats) = MidiFeature::new(ports, MidiConfig::new(name.clone()), post);
+                services.midi = Some(stats);
                 builder = builder.feature(feature).map_err(|e| e.to_string())?;
             }
             Err(e) => warn!("MIDI forwarding is unavailable: {e}"),

@@ -1,0 +1,80 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --prerelease --title "Bridge $TAG" --notes-file .github/release-notes.md
+
+  build:
+    needs: create
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: ubuntu-22.04
+            name: linux-x64
+          - os: macos-latest
+            name: macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf file
+
+      - name: Daemon and CLI
+        run: |
+          cargo build --release --locked -p bridge-daemon -p bridge-cli
+          dir="bridge-$TAG-${{ matrix.name }}"
+          mkdir "$dir"
+          ext=""; [ "$RUNNER_OS" = Windows ] && ext=".exe"
+          cp "target/release/bridged$ext" "target/release/bridge$ext" README.md "$dir/"
+          if [ "$RUNNER_OS" = Windows ]; then 7z a "$dir.zip" "$dir"; else tar czf "$dir.tar.gz" "$dir"; fi
+          gh release upload "$TAG" "$dir".* --clobber
+
+      - name: Desktop app
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npx --yes @tauri-apps/cli@2 build
+          shopt -s nullglob
+          files=(src-tauri/target/release/bundle/{msi/*.msi,nsis/*.exe,deb/*.deb,rpm/*.rpm,appimage/*.AppImage,dmg/*.dmg})
+          [ ${#files[@]} -gt 0 ] || { echo "no bundles"; exit 1; }
+          gh release upload "$TAG" "${files[@]}" --clobber

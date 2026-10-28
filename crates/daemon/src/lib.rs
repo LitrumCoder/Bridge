@@ -14,8 +14,8 @@ use bridge_core::PairingSecret;
 use bridge_core::state::StateCommand;
 use bridge_feature_files::{Direction, FilesHandle, TransferState, TransferStatus};
 use bridge_ipc::{
-    DeviceEntry, IpcHandler, NearbyEntry, PairTarget, ProfileEntry, Request, Response,
-    TransferEntry,
+    DeviceEntry, IpcHandler, MidiStreamEntry, NearbyEntry, PairTarget, ProfileEntry, Request,
+    Response, TransferEntry, UiEvent,
 };
 use bridge_protocol::{DeviceId, PermissionId};
 use bridge_transport::ExpectedPeer;
@@ -31,6 +31,37 @@ pub use trust::{ALL_PERMISSIONS, TrustStore, TrustedPeer, unix_now};
 #[derive(Clone, Default)]
 pub struct Services {
     pub files: Option<FilesHandle>,
+    pub midi: Option<bridge_feature_midi::MidiHandle>,
+    pub events: UiEvents,
+}
+
+/// The last router events, numbered, for UIs that poll.
+#[derive(Clone, Default)]
+pub struct UiEvents(Arc<std::sync::Mutex<EventLog>>);
+
+type EventLog = (u64, std::collections::VecDeque<(u64, UiEvent)>);
+
+impl UiEvents {
+    pub fn push(&self, e: UiEvent) {
+        let mut g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        g.0 += 1;
+        let n = g.0;
+        g.1.push_back((n, e));
+        if g.1.len() > 64 {
+            g.1.pop_front();
+        }
+    }
+
+    pub fn since(&self, since: u64) -> (u64, Vec<UiEvent>) {
+        let g = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        (
+            g.0,
+            g.1.iter()
+                .filter(|(n, _)| *n > since)
+                .map(|(_, e)| e.clone())
+                .collect(),
+        )
+    }
 }
 
 /// IPC request handler for a running node. `shutdown` is notified on `Request::Shutdown`.
@@ -177,6 +208,34 @@ async fn handle_request(
             };
             node.set_permissions(id, granted.into_iter().map(PermissionId).collect());
             Response::Ok
+        }
+        Request::SetLayout { screens } => match node.set_layout(screens) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error(e),
+        },
+        Request::MidiStreams => Response::Midi(
+            services
+                .midi
+                .as_ref()
+                .map(|m| {
+                    m.streams()
+                        .into_iter()
+                        .map(|s| MidiStreamEntry {
+                            device: s.peer,
+                            port: s.port,
+                            to_instrument: s.to_instrument,
+                            events: s.stats.events,
+                            late: s.stats.late,
+                            min_transit_us: s.stats.min_transit_us,
+                            buffer_us: s.stats.buffer_us,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        Request::Events { since } => {
+            let (next, events) = services.events.since(since);
+            Response::Events { next, events }
         }
         Request::Pause => state(node, StateCommand::Pause),
         Request::Resume => state(node, StateCommand::Resume),

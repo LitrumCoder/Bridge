@@ -8,6 +8,7 @@ mod transport;
 use std::net::SocketAddr;
 
 use bridge_protocol::DeviceId;
+use bridge_protocol::control::ScreenPlacement;
 use serde::{Deserialize, Serialize};
 
 pub use status::{NodeStatus, PeerStatus};
@@ -70,6 +71,15 @@ pub enum Request {
     ForgetProfile {
         name: String,
     },
+    /// A new arrangement from the layout editor.
+    SetLayout {
+        screens: Vec<ScreenPlacement>,
+    },
+    MidiStreams,
+    /// Router events after `since` (where the cursor is), for the UI.
+    Events {
+        since: u64,
+    },
     // TODO(M9): Subscribe for the desktop UI event stream.
 }
 
@@ -120,6 +130,34 @@ pub enum Response {
     },
     Transfers(Vec<TransferEntry>),
     Profiles(Vec<ProfileEntry>),
+    Midi(Vec<MidiStreamEntry>),
+    Events {
+        next: u64,
+        events: Vec<UiEvent>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MidiStreamEntry {
+    pub device: DeviceId,
+    pub port: u16,
+    pub to_instrument: bool,
+    pub events: u64,
+    pub late: u64,
+    pub min_transit_us: u64,
+    pub buffer_us: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum UiEvent {
+    /// The cursor went to this device.
+    Entered { device: DeviceId },
+    /// It came back here.
+    Returned,
+    /// The cursor is locked to its screen (or free again).
+    Locked(bool),
+    /// The user shook the mouse on `device`.
+    Shake { device: DeviceId },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
