@@ -45,18 +45,18 @@
 
 | Веха | Статус |
 |---|---|
-| 0 | готово, коммит `0212083` |
-| 1 | готово, коммит `8f5082c` |
-| 2 | готово, коммит `29f3a1d` |
-| 3 | готово, коммит `9e6834a` |
-| 4a | готово, коммит `b4330e2` |
+| 0 | готово, коммит `465382e` |
+| 1 | готово, коммит `4b66be2` |
+| 2 | готово, коммит `6b40d16` |
+| 3 | готово, коммит `840e500` |
+| 4a | готово, коммит `5337dae` |
 | 4b | готово (см. git log): Windows (LL-хуки, `SendInput`, мониторы с DPI, раскладка, lock-клавиши), X11 (XInput2 raw, grab, XTest, RandR), таблицы HID ↔ set 1 / evdev, `bridged` включает ввод сам; нативные тесты: Windows (`BRIDGE_PLATFORM_TESTS=1`), X11 под Xvfb/WSLg. Оверлеи (подсветка края, локатор) перенесены в веху 9 — их рисует UI-процесс |
-| 4c | готово, коммит `a214883`: macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
-| 5 | готово, коммит `6500bbd`: протокол буфера, фича с ленивой выдачей, mock + интеграционные тесты, Windows (отложенный рендеринг, исключение из журнала Win+V) и X11 (владение `CLIPBOARD`, XFixes, INCR) с нативными тестами. macOS и чистый Wayland — `Unsupported` |
-| 6a | готово, коммит `21d30ed`: протокол файлов с валидацией путей, движок (ведёт приёмник, до 4 файлов параллельно, докачка по `.bridgepart` + sidecar, BLAKE3, `Restart` при изменении источника, отмена, mtime, конфликты `имя (1)`), bulk-соединение с LEDBAT-контроллером, `bridge send/transfers/cancel`; интеграционные тесты на netsim и тест p99 ввода под нагрузкой (24 МБ; 2 ГБ — `BRIDGE_LONG_TESTS=1`) |
-| 6b | готово, коммит `9112a00`: роутер передаёт зажатую кнопку при перетаскивании файлов, `DragOffer`/`DragResult`, staging с ожиданием завершения, mock + интеграционный drag (сброс, отмена, «передумал»); Windows OLE (полосы у краёв как drop target, `DoDragDrop` с `CF_HDROP`), X11 XDND обеих ролей с нативным тестом. Spike `DoDragDrop` под `SendInput` и «в окно DAW» — ручные проверки D1–D6; виртуальные файлы Windows — TODO |
-| 7 | готово, коммит `af507c0`: протокол MIDI с проверкой сообщений, парсер/трекер нот/jitter-буфер в ядре (proptest), фича с потоком проигрывания и отпусканием нот при разрыве, Windows (WinMM + loopMIDI; spike WMS: нужен SDK — TODO), Linux (ALSA через `dlopen`, на живой системе не проверено); netsim: порядок и полнота при потерях 5 %; задержка p50 3,18 мс / p99 4,0 мс с буфером 3 мс, бенчмарк `midi/note_instrument_to_daw_loopback` |
-| 8 | готово, коммит `0832e44`: `DeviceStateMachine` (Pause/Resume/Leave/Rejoin, сеть с дебаунсом 3 с, профили с `auto_join`), `NetworkMonitor` (Windows IP Helper, Linux `/proc`), `profiles.toml`, выход с `LEAVING` без передозвона, возврат с дозвоном, фичи на паузе, `bridge pause/resume/leave/rejoin/profiles/profile`; интеграционные тесты на 3 узлах |
+| 4c | готово, коммит `dd1f67a`: macOS (`CGEventTap` с подавлением, `CGEventPost` в HID-tap, `CGDisplay*`, онбординг Accessibility; проверено `cargo clippy --target aarch64-apple-darwin`, на Mac не запускалось), Wayland (барьеры InputCapture + EIS receiver, RemoteDesktop + EIS sender, restore token; на композиторе не проверено), выбор бэкенда по `XDG_SESSION_TYPE` |
+| 5 | готово, коммит `bebfe44`: протокол буфера, фича с ленивой выдачей, mock + интеграционные тесты, Windows (отложенный рендеринг, исключение из журнала Win+V) и X11 (владение `CLIPBOARD`, XFixes, INCR) с нативными тестами. macOS и чистый Wayland — `Unsupported` |
+| 6a | готово, коммит `aa1ce8c`: протокол файлов с валидацией путей, движок (ведёт приёмник, до 4 файлов параллельно, докачка по `.bridgepart` + sidecar, BLAKE3, `Restart` при изменении источника, отмена, mtime, конфликты `имя (1)`), bulk-соединение с LEDBAT-контроллером, `bridge send/transfers/cancel`; интеграционные тесты на netsim и тест p99 ввода под нагрузкой (24 МБ; 2 ГБ — `BRIDGE_LONG_TESTS=1`) |
+| 6b | готово, коммит `df00f89`: роутер передаёт зажатую кнопку при перетаскивании файлов, `DragOffer`/`DragResult`, staging с ожиданием завершения, mock + интеграционный drag (сброс, отмена, «передумал»); Windows OLE (полосы у краёв как drop target, `DoDragDrop` с `CF_HDROP`), X11 XDND обеих ролей с нативным тестом. Spike `DoDragDrop` под `SendInput` и «в окно DAW» — ручные проверки D1–D6; виртуальные файлы Windows — TODO |
+| 7 | готово, коммит `02cd07f`: протокол MIDI с проверкой сообщений, парсер/трекер нот/jitter-буфер в ядре (proptest), фича с потоком проигрывания и отпусканием нот при разрыве, Windows (WinMM + loopMIDI; spike WMS: нужен SDK — TODO), Linux (ALSA через `dlopen`, на живой системе не проверено); netsim: порядок и полнота при потерях 5 %; задержка p50 3,18 мс / p99 4,0 мс с буфером 3 мс, бенчмарк `midi/note_instrument_to_daw_loopback` |
+| 8 | готово, коммит `e5de7e2`: `DeviceStateMachine` (Pause/Resume/Leave/Rejoin, сеть с дебаунсом 3 с, профили с `auto_join`), `NetworkMonitor` (Windows IP Helper, Linux `/proc`), `profiles.toml`, выход с `LEAVING` без передозвона, возврат с дозвоном, фичи на паузе, `bridge pause/resume/leave/rejoin/profiles/profile`; интеграционные тесты на 3 узлах |
 
 ## Перенесено в конец этапа: macOS
 

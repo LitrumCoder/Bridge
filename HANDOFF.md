@@ -24,18 +24,18 @@
 
 | Веха | Коммит | Что |
 |---|---|---|
-| 0 | `0212083` | workspace, `deny.toml`, xtask (`check-deps`, `bench-check`), CI |
-| 1 | `8f5082c` | протокол: конверт, кадры, Bounded-типы, control-сообщения, версии, golden, proptest, fuzz (`fuzz/`) |
-| 2 | `29f3a1d` | sans-IO `Core`, Feature/Registry, QUIC (quinn + rustls/ring), netsim, `bridge_node`, IPC, `bridged`, `bridge` |
-| 3 | `9e6834a` | mDNS (`mdns-sd`), SPAKE2-сопряжение по коду и QR, `trust.toml`, права, отзыв, лимиты рукопожатий |
-| 4a | `b4330e2` | геометрия, InputRouter, KeyTracker, хоткеи, сторож, синхронизация раскладки, фича `input`, mock-платформа |
-| 4b | `dbc4455` | Windows (LL-хуки + SendInput) и X11 (XInput2 + XTest + RandR), ввод включён в `bridged` |
-| 4c | `3d51159`, `a214883` | macOS (CGEventTap + CGEventPost, онбординг Accessibility; только `clippy --target aarch64-apple-darwin`), Wayland (InputCapture + RemoteDesktop + EIS через `ashpd`/`reis`; на композиторе не проверено) |
-| 5 | `6500bbd` | буфер обмена: протокол, фича с ленивой выдачей, Windows и X11 с нативными тестами; macOS и чистый Wayland — `Unsupported` |
-| 6a | `21d30ed` | движок файлов (докачка, BLAKE3, конфликты, отмена), bulk-соединение с LEDBAT, `bridge send/transfers/cancel` |
-| 6b | `9112a00` | перетаскивание: передача кнопки роутером, staging, Windows OLE, X11 XDND (нативный тест), mock-интеграция |
-| 7 | `af507c0` | MIDI: протокол, парсер/трекер/jitter-буфер (proptest), поток проигрывания, Windows WinMM + loopMIDI, Linux ALSA через `dlopen`; p50 3,18 мс |
-| 8 | `0832e44` | состояния Pause/Leave/Rejoin, `NetworkMonitor`, профили сетей с автовыходом/автовозвратом, тесты на 3 узлах |
+| 0 | `465382e` | workspace, `deny.toml`, xtask (`check-deps`, `bench-check`), CI |
+| 1 | `4b66be2` | протокол: конверт, кадры, Bounded-типы, control-сообщения, версии, golden, proptest, fuzz (`fuzz/`) |
+| 2 | `6b40d16` | sans-IO `Core`, Feature/Registry, QUIC (quinn + rustls/ring), netsim, `bridge_node`, IPC, `bridged`, `bridge` |
+| 3 | `840e500` | mDNS (`mdns-sd`), SPAKE2-сопряжение по коду и QR, `trust.toml`, права, отзыв, лимиты рукопожатий |
+| 4a | `5337dae` | геометрия, InputRouter, KeyTracker, хоткеи, сторож, синхронизация раскладки, фича `input`, mock-платформа |
+| 4b | `e27731b` | Windows (LL-хуки + SendInput) и X11 (XInput2 + XTest + RandR), ввод включён в `bridged` |
+| 4c | `62e47ce`, `dd1f67a` | macOS (CGEventTap + CGEventPost, онбординг Accessibility; только `clippy --target aarch64-apple-darwin`), Wayland (InputCapture + RemoteDesktop + EIS через `ashpd`/`reis`; на композиторе не проверено) |
+| 5 | `bebfe44` | буфер обмена: протокол, фича с ленивой выдачей, Windows и X11 с нативными тестами; macOS и чистый Wayland — `Unsupported` |
+| 6a | `aa1ce8c` | движок файлов (докачка, BLAKE3, конфликты, отмена), bulk-соединение с LEDBAT, `bridge send/transfers/cancel` |
+| 6b | `df00f89` | перетаскивание: передача кнопки роутером, staging, Windows OLE, X11 XDND (нативный тест), mock-интеграция |
+| 7 | `02cd07f` | MIDI: протокол, парсер/трекер/jitter-буфер (proptest), поток проигрывания, Windows WinMM + loopMIDI, Linux ALSA через `dlopen`; p50 3,18 мс |
+| 8 | `e5de7e2` | состояния Pause/Leave/Rejoin, `NetworkMonitor`, профили сетей с автовыходом/автовозвратом, тесты на 3 узлах |
 
 Задержка ввода через QUIC на loopback: p50 72 мкс, p99 119 мкс. Покрытие protocol + core — 92,9%.
 Bulk с LEDBAT (горло 40 Мбит/с, очередь 1 МБ): p99 пинга 15,7 мс при базовых 13,1 мс; стандартный контроллер — 203 мс.
