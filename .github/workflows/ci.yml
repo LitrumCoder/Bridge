@@ -50,7 +50,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y xvfb
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: xvfb-run -a env BRIDGE_X11_TESTS=1 cargo test --locked -p bridge-platform --features mock --test x11_native -- --test-threads=1 --nocapture
+      - run: xvfb-run -a env BRIDGE_X11_TESTS=1 bash .github/scripts/annotate.sh cargo test --locked -p bridge-platform --features mock --test x11_native -- --test-threads=1 --nocapture
 
   platform-windows:
     name: Windows hooks and SendInput
@@ -103,7 +103,7 @@ jobs:
         working-directory: fuzz
         run: |
           for t in $(cargo +nightly fuzz list); do
-            bash ../.github/scripts/annotate.sh cargo +nightly fuzz run "$t" -- -max_total_time=60 -rss_limit_mb=1024
+            bash ../.github/scripts/annotate.sh cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$t" -- -max_total_time=60 -rss_limit_mb=1024
           done
 
   bench:
@@ -113,5 +113,5 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: bash .github/scripts/annotate.sh cargo bench --locked -p bridge-protocol -p bridge-testkit -- --noplot
+      - run: bash .github/scripts/annotate.sh cargo bench --locked -p bridge-protocol -p bridge-testkit --bench '*' -- --noplot
       - run: bash .github/scripts/annotate.sh cargo xtask bench-check

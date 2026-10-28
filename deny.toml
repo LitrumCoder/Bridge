@@ -93,6 +93,10 @@ allow = ["MPL-2.0"]
 
 [advisories]
 ignore = []
+# Unmaintained crates are errors only when we depend on them directly. zbus 5 (via ashpd)
+# pulls zvariant_derive and friends, RUSTSEC-2026-0372; no safe upgrade until ashpd moves
+# to zbus 6. Vulnerabilities still fail at any depth.
+unmaintained = "workspace"
 
 [bans]
 multiple-versions = "warn"
