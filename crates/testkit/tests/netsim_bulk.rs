@@ -189,10 +189,11 @@ async fn file_traffic_does_not_queue_in_front_of_input() {
         ledbat.load_p99,
         ledbat.rate_bps / 1e6
     );
-    // The simulator runs on OS timers. On Windows they get coarse under load (on battery,
-    // timer coalescing), which reads as queuing delay to the controller; absolute limits
-    // are checked on Linux and with BRIDGE_STRICT_NETSIM=1, the comparison everywhere.
-    let strict = cfg!(not(windows)) || std::env::var_os("BRIDGE_STRICT_NETSIM").is_some();
+    // The simulator runs on OS timers. On Windows and on macOS runner VMs they get coarse
+    // under load (battery, timer coalescing), which reads as queuing delay to the controller;
+    // absolute limits are checked on Linux and with BRIDGE_STRICT_NETSIM=1, the comparison
+    // everywhere.
+    let strict = cfg!(target_os = "linux") || std::env::var_os("BRIDGE_STRICT_NETSIM").is_some();
     if strict {
         assert!(
             ledbat.load_p99 <= ledbat.base_p50 + Duration::from_millis(25),
