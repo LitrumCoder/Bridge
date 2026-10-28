@@ -265,10 +265,18 @@ impl Feature for InputFeature {
     ) -> Result<(), FeatureError> {
         let msg = InputMessage::decode(kind, payload)?;
         if self.local_state != DeviceState::Connected {
+            debug!(%peer, kind, state = ?self.local_state, "input dropped: this device is not connected");
             return Ok(());
         }
         let remap = self.remap_for(cx.peer(&peer).map(|v| v.platform));
         let actions = self.injected.on_message(peer, &msg, remap);
+        match &msg {
+            InputMessage::Enter(e) => {
+                debug!(%peer, screen = e.screen, x = e.x, y = e.y, "cursor entered from peer")
+            }
+            InputMessage::Leave(_) => debug!(%peer, "cursor left to peer"),
+            _ => {}
+        }
         self.apply(actions);
         Ok(())
     }
@@ -280,8 +288,15 @@ impl Feature for InputFeature {
         payload: &[u8],
     ) -> Result<(), FeatureError> {
         let motion: Motion = decode_payload(payload)?;
-        if let Some(a) = self.injected.on_motion(peer, motion) {
-            self.apply(vec![a]);
+        let seq = motion.seq();
+        match self.injected.on_motion(peer, motion) {
+            Some(a) => {
+                if seq % 64 == 0 {
+                    debug!(%peer, seq, ?a, "motion applied");
+                }
+                self.apply(vec![a]);
+            }
+            None => debug!(%peer, seq, "motion ignored (stale or no cursor here)"),
         }
         Ok(())
     }

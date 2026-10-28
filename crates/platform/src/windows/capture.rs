@@ -36,7 +36,22 @@ struct HookState {
     last_y: AtomicI32,
     park_x: AtomicI32,
     park_y: AtomicI32,
+    /// After our own SetCursorPos, moves still queued from before it would read as a jump of
+    /// half a screen; up to this many are dropped until the warp's own move arrives.
+    settle: AtomicU32,
+    settle_x: AtomicI32,
+    settle_y: AtomicI32,
     pressed: Mutex<HashSet<u16>>,
+}
+
+const SETTLE_EVENTS: u32 = 16;
+
+fn set_cursor(s: &HookState, x: i32, y: i32) {
+    s.settle_x.store(x, Ordering::Relaxed);
+    s.settle_y.store(y, Ordering::Relaxed);
+    s.settle.store(SETTLE_EVENTS, Ordering::Release);
+    // SAFETY: plain cursor move.
+    unsafe { SetCursorPos(x, y) };
 }
 
 static STATE: OnceLock<HookState> = OnceLock::new();
@@ -49,6 +64,9 @@ fn state() -> &'static HookState {
         last_y: AtomicI32::new(0),
         park_x: AtomicI32::new(0),
         park_y: AtomicI32::new(0),
+        settle: AtomicU32::new(0),
+        settle_x: AtomicI32::new(0),
+        settle_y: AtomicI32::new(0),
         pressed: Mutex::new(HashSet::new()),
     })
 }
@@ -75,6 +93,20 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
     let s = state();
     let msg = wparam as u32;
+    if msg == WM_MOUSEMOVE {
+        let pending = s.settle.load(Ordering::Acquire);
+        if pending > 0 {
+            let warped = info.pt.x == s.settle_x.load(Ordering::Relaxed)
+                && info.pt.y == s.settle_y.load(Ordering::Relaxed);
+            s.settle
+                .store(if warped { 0 } else { pending - 1 }, Ordering::Release);
+            if warped {
+                // SAFETY: forwarding the unchanged arguments.
+                return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+            }
+            return 1;
+        }
+    }
     let high = (info.mouseData >> 16) as u16;
     let ev = match msg {
         WM_MOUSEMOVE => {
@@ -311,18 +343,18 @@ impl InputCapture for WinCapture {
             let (px, py) = (w / 2, h / 2);
             s.park_x.store(px, Ordering::Relaxed);
             s.park_y.store(py, Ordering::Relaxed);
-            // SAFETY: plain cursor move.
-            unsafe { SetCursorPos(px, py) };
+            s.grab.store(true, Ordering::Release);
+            set_cursor(s, px, py);
+        } else {
+            s.grab.store(false, Ordering::Release);
         }
-        s.grab.store(grab, Ordering::Release);
     }
 
     fn warp(&self, x: i32, y: i32) {
         let s = state();
-        // SAFETY: plain cursor move.
-        unsafe { SetCursorPos(x, y) };
         s.last_x.store(x, Ordering::Relaxed);
         s.last_y.store(y, Ordering::Relaxed);
+        set_cursor(s, x, y);
     }
 
     fn stop(&self) {
